@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>NetPulse 2D — Mapa Planetário de Conexões em Tempo Real</title>
+  <link rel="icon" type="image/png" href="/favicon.png" />
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body class="left-open">
@@ -14,9 +15,15 @@
     <div class="brand">
       <div class="brand-pulse" id="connDot"></div>
       <div>
-        <div class="brand-title">NetPulse 2D <span class="badge-cpp">C++20</span></div>
+        <div class="brand-title">NetPulse 2D <span class="badge-cpp">C++20</span> <span class="badge-ver" id="appVersionBadge">v1.0.0</span> <button class="ver-check-btn" id="btnCheckUpdate" title="Verificar atualizacoes no GitHub">↻</button></div>
         <div class="brand-sub" id="engineStatus">Conectando ao motor nativo...</div>
       </div>
+    </div>
+
+    <div class="update-pill hidden" id="updatePill">
+      <span id="updatePillText">Nova versão disponível</span>
+      <button class="update-apply-btn" id="btnApplyUpdate">Atualizar</button>
+      <a class="update-notes-link" id="updateNotesLink" href="#" target="_blank" rel="noopener">Notas</a>
     </div>
 
     <div class="throughput-box">

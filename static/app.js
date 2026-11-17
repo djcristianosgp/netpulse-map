@@ -239,6 +239,9 @@ function updateKpisAndBanner(filteredConns) {
 
   $('rxRate').textContent = formatBytesPerSec(snap.nic?.rxBps || 0);
   $('txRate').textContent = formatBytesPerSec(snap.nic?.txBps || 0);
+  if (snap.version) {
+    $('appVersionBadge').textContent = `v${snap.version}`;
+  }
 
   const pollMs = ((snap.pollUs || 0) / 1000).toFixed(2);
   if (!state.paused) {
@@ -760,6 +763,101 @@ async function init() {
   });
 
   connectWebSocket();
+  initUpdateMonitor();
+}
+
+let updatePollTimer = null;
+
+function renderUpdateStatus(u) {
+  if (!u) return;
+  if (u.currentVersion) {
+    $('appVersionBadge').textContent = `v${u.currentVersion}`;
+  }
+
+  const pill = $('updatePill');
+  const txt = $('updatePillText');
+  const btn = $('btnApplyUpdate');
+  const notes = $('updateNotesLink');
+
+  if (u.releaseUrl) {
+    notes.href = u.releaseUrl;
+    notes.classList.remove('hidden');
+  } else {
+    notes.classList.add('hidden');
+  }
+
+  if (u.state === 'available') {
+    pill.classList.remove('hidden');
+    txt.textContent = `Nova versão v${u.latestVersion}`;
+    btn.textContent = 'Atualizar';
+    btn.disabled = false;
+    btn.classList.remove('hidden');
+  } else if (u.state === 'downloading') {
+    pill.classList.remove('hidden');
+    txt.textContent = `Baixando v${u.latestVersion} (${u.progressPct || 0}%)...`;
+    btn.classList.add('hidden');
+  } else if (u.state === 'verifying') {
+    pill.classList.remove('hidden');
+    txt.textContent = 'Verificando SHA-256...';
+    btn.classList.add('hidden');
+  } else if (u.state === 'installing') {
+    pill.classList.remove('hidden');
+    txt.textContent = 'Instalando & reiniciando...';
+    btn.classList.add('hidden');
+  } else if (u.state === 'checking') {
+    $('btnCheckUpdate').title = 'Verificando atualizacoes...';
+  } else if (u.state === 'up_to_date') {
+    pill.classList.add('hidden');
+    $('btnCheckUpdate').title = `Atualizado (v${u.currentVersion})`;
+  } else if (u.state === 'error') {
+    $('btnCheckUpdate').title = `Erro ao verificar atualização: ${u.error || 'falha de rede'}`;
+    if (u.latestVersion && u.downloadUrl) {
+      pill.classList.remove('hidden');
+      txt.textContent = u.error || 'Erro ao atualizar';
+      btn.textContent = 'Tentar de novo';
+      btn.disabled = false;
+      btn.classList.remove('hidden');
+    }
+  }
+}
+
+async function pollUpdateStatus() {
+  try {
+    const resp = await fetch('/api/update/status');
+    if (!resp.ok) return;
+    const u = await resp.json();
+    renderUpdateStatus(u);
+
+    const active = ['checking', 'downloading', 'verifying', 'installing'].includes(u.state);
+    if (active && !updatePollTimer) {
+      updatePollTimer = setInterval(pollUpdateStatus, 450);
+    } else if (!active && updatePollTimer) {
+      clearInterval(updatePollTimer);
+      updatePollTimer = null;
+    }
+  } catch {
+    // ignore transient offline state during restart
+  }
+}
+
+function initUpdateMonitor() {
+  $('btnCheckUpdate').addEventListener('click', async () => {
+    try {
+      await fetch('/api/update/check', { method: 'POST' });
+      pollUpdateStatus();
+    } catch {}
+  });
+
+  $('btnApplyUpdate').addEventListener('click', async () => {
+    $('btnApplyUpdate').disabled = true;
+    try {
+      await fetch('/api/update/apply', { method: 'POST' });
+      pollUpdateStatus();
+    } catch {}
+  });
+
+  setTimeout(pollUpdateStatus, 3200);
+  setInterval(pollUpdateStatus, 30000);
 }
 
 init();

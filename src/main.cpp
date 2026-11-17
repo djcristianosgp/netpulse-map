@@ -12,6 +12,8 @@
 #include "geo_dns.hpp"
 #include "net_monitor.hpp"
 #include "serializer.hpp"
+#include "updater.hpp"
+#include "version.hpp"
 #include "ws_server.hpp"
 
 #include <algorithm>
@@ -150,6 +152,9 @@ int main(int argc, char** argv) {
   netpulse::GeoDnsService geoDns(dataDir / "geoip_cache.tsv");
   geoDns.start();
 
+  netpulse::UpdateManager updater(netpulse::kAppVersion, []() { gRunning.store(false); });
+  updater.startAutoCheck();
+
   netpulse::NetMonitor monitor;
   netpulse::WsServer server(port, staticDir, assetsDir);
 
@@ -158,12 +163,28 @@ int main(int argc, char** argv) {
 
   server.setHealthCallback([&]() {
     uint64_t uptime = nowMs() - startMs;
-    return std::string("{\"status\":\"ok\",\"engine\":\"C++20 Native Win32\",\"uptimeMs\":") +
+    return std::string("{\"status\":\"ok\",\"version\":\"") + netpulse::kAppVersion +
+           "\",\"engine\":\"C++20 Native Win32\",\"uptimeMs\":" +
            std::to_string(uptime) +
            ",\"pollUs\":" + std::to_string(lastPollUs.load()) +
            ",\"geoCached\":" + std::to_string(geoDns.cachedGeoCount()) +
            ",\"dnsCached\":" + std::to_string(geoDns.cachedDnsCount()) +
            ",\"wsClients\":" + std::to_string(server.clientCount()) + "}";
+  });
+
+  server.setApiCallback([&](const std::string& method, const std::string& path) -> std::pair<int, std::string> {
+    if (path == "/api/update/status" && method == "GET") {
+      return {200, updater.getStatusJson()};
+    }
+    if (path == "/api/update/check" && method == "POST") {
+      updater.checkNowAsync();
+      return {202, updater.getStatusJson()};
+    }
+    if (path == "/api/update/apply" && method == "POST") {
+      bool started = updater.startInstallAsync();
+      return {started ? 202 : 409, updater.getStatusJson()};
+    }
+    return {404, "{\"error\":\"not_found\"}"};
   });
 
   server.setCommandCallback([&](const std::string& cmd) {
@@ -241,6 +262,7 @@ int main(int argc, char** argv) {
   }
 
   std::cout << "\n[NetPulse Map] Shutting down...\n";
+  updater.stop();
   server.stop();
   geoDns.stop();
   WSACleanup();

@@ -19,8 +19,8 @@ if ($Version -match "^(\d+)\.(\d+)\.(\d+)") {
   $NumericVersion = "$($Matches[1]).$($Matches[2]).0.0"
 }
 
-Write-Host "[1/5] Compilando C++20 (/O2)..."
-& cmd /c "`"$BuildScript`""
+Write-Host "[1/5] Compilando C++20 (/O2) v$Version..."
+& cmd /c "`"$BuildScript`" $Version"
 if ($LASTEXITCODE -ne 0) { throw "Falha na compilacao C++20." }
 
 Write-Host "[2/5] Executando testes nativos C++..."

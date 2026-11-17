@@ -12,6 +12,7 @@
 #include "../src/geo_dns.hpp"
 #include "../src/net_monitor.hpp"
 #include "../src/serializer.hpp"
+#include "../src/updater.hpp"
 #include "../src/ws_server.hpp"
 
 #include <cassert>
@@ -192,6 +193,52 @@ int testLiveMonitorAndWsLoopback() {
   return 0;
 }
 
+int testSemVerAndReleaseParsing() {
+  CHECK(isNewerVersion("1.0.0", "1.0.1"));
+  CHECK(isNewerVersion("1.9.0", "1.10.0"));
+  CHECK(isNewerVersion("1.0.0-beta.1", "1.0.0"));
+  CHECK(!isNewerVersion("1.0.0", "1.0.0"));
+  CHECK(!isNewerVersion("1.0.2", "1.0.1"));
+  CHECK(!isNewerVersion("2.0.0", "1.9.9"));
+
+  const std::string ghJson = R"({
+    "tag_name": "v1.0.1",
+    "html_url": "https://github.com/djcristianosgp/netpulse-map/releases/tag/v1.0.1",
+    "published_at": "2026-11-17T18:00:00Z",
+    "assets": [
+      {"name": "checksums.txt", "size": 180, "browser_download_url": "https://github.com/djcristianosgp/netpulse-map/releases/download/v1.0.1/checksums.txt"},
+      {"name": "NetPulse2D-Setup-x64.exe", "size": 2331922, "browser_download_url": "https://github.com/djcristianosgp/netpulse-map/releases/download/v1.0.1/NetPulse2D-Setup-x64.exe"}
+    ]
+  })";
+  auto rel = parseGitHubReleaseJson(ghJson);
+  CHECK(rel.valid);
+  CHECK(rel.version == "1.0.1");
+  CHECK(rel.installerSize == 2331922);
+  CHECK(rel.installerUrl.find("NetPulse2D-Setup-x64.exe") != std::string::npos);
+  CHECK(rel.checksumsUrl.find("checksums.txt") != std::string::npos);
+
+  const std::string csText =
+      "\xEF\xBB\xBF"
+      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  NetPulse2D-Portable-x64.zip\n"
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  NetPulse2D-Setup-x64.exe\n";
+  CHECK(parseSha256FromChecksums(csText, "NetPulse2D-Setup-x64.exe") ==
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+
+  auto tmpFile = std::filesystem::temp_directory_path() / "netpulse_sha256_test.bin";
+  {
+    std::ofstream out(tmpFile, std::ios::binary | std::ios::trunc);
+    out << "abc";
+  }
+  // SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+  CHECK(computeFileSha256Hex(tmpFile) ==
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  std::error_code ec;
+  std::filesystem::remove(tmpFile, ec);
+
+  std::cout << "[PASS] testSemVerAndReleaseParsing\n";
+  return 0;
+}
+
 int main() {
   WSADATA wsa{};
   if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
@@ -201,6 +248,7 @@ int main() {
   rc |= testGeoJsonAndCache();
   rc |= testWebSocketRfc6455();
   rc |= testLiveMonitorAndWsLoopback();
+  rc |= testSemVerAndReleaseParsing();
 
   WSACleanup();
   if (rc == 0) {

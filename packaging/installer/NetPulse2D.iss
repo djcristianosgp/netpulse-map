@@ -42,6 +42,8 @@ CloseApplicationsFilter=netpulse.exe
 RestartApplications=no
 DisableDirPage=auto
 DisableProgramGroupPage=auto
+SetupIconFile=..\..\assets\netpulse.ico
+UninstallDisplayIcon={app}\assets\netpulse.ico
 VersionInfoVersion={#MyAppNumericVersion}
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription=NetPulse 2D - Mapa Planetario de Conexoes de Rede em Tempo Real
@@ -59,9 +61,9 @@ Name: "startup"; Description: "Iniciar automaticamente com o Windows"; GroupDesc
 Source: "..\..\dist\staging\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
-Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\assets\netpulse.ico"
+Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"; IconFilename: "{app}\assets\netpulse.ico"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\assets\netpulse.ico"; Tasks: desktopicon
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "NetPulse2D"; ValueData: """{app}\{#MyAppExeName}"" --no-browser"; Flags: uninsdeletevalue; Tasks: startup

@@ -69,6 +69,7 @@ const char* mimeFromExtension(const std::filesystem::path& p) {
   if (ext == ".json") return "application/json; charset=utf-8";
   if (ext == ".svg") return "image/svg+xml";
   if (ext == ".png") return "image/png";
+  if (ext == ".ico") return "image/x-icon";
   return "application/octet-stream";
 }
 
@@ -267,6 +268,10 @@ void WsServer::setHealthCallback(HealthCallback cb) {
   onHealth_ = std::move(cb);
 }
 
+void WsServer::setApiCallback(ApiCallback cb) {
+  onApi_ = std::move(cb);
+}
+
 void WsServer::broadcastText(const std::string& text) {
   std::vector<std::shared_ptr<ClientConn>> snapshot;
   {
@@ -441,6 +446,21 @@ void WsServer::handleHttpOrWs(uintptr_t rawSock) {
     }
 
     handleWebSocketClient(std::move(client));
+    return;
+  }
+
+  if (path.rfind("/api/", 0) == 0 && path != "/api/health" && path != "/api/snapshot") {
+    if (onApi_) {
+      auto [code, body] = onApi_(method, path);
+      const char* status = (code == 200) ? "200 OK"
+                         : (code == 202) ? "202 Accepted"
+                         : (code == 400) ? "400 Bad Request"
+                         : (code == 409) ? "409 Conflict"
+                                         : "404 Not Found";
+      sendSimpleResponse(rawSock, status, "application/json; charset=utf-8", body);
+      return;
+    }
+    sendSimpleResponse(rawSock, "404 Not Found", "application/json; charset=utf-8", "{\"error\":\"not_found\"}");
     return;
   }
 

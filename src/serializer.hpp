@@ -2,6 +2,7 @@
 
 #include "geo_dns.hpp"
 #include "models.hpp"
+#include "version.hpp"
 
 #include <cstdio>
 #include <string>
@@ -18,7 +19,9 @@ inline std::string serializeSnapshotJson(const TelemetrySnapshot& snap,
 
   char numBuf[128];
 
-  out += "{\"ts\":";
+  out += "{\"version\":";
+  appendJsonEscaped(out, kAppVersion);
+  out += ",\"ts\":";
   out += std::to_string(snap.timestampMs);
   out += ",\"pollUs\":";
   out += std::to_string(snap.pollLatencyUs);

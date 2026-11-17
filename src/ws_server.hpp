@@ -21,6 +21,7 @@ class WsServer {
 public:
   using CommandCallback = std::function<void(const std::string&)>;
   using HealthCallback = std::function<std::string()>;
+  using ApiCallback = std::function<std::pair<int, std::string>(const std::string& method, const std::string& path)>;
 
   WsServer(uint16_t port,
            std::filesystem::path staticDir,
@@ -40,6 +41,7 @@ public:
   void broadcastText(const std::string& text);
   void setCommandCallback(CommandCallback cb);
   void setHealthCallback(HealthCallback cb);
+  void setApiCallback(ApiCallback cb);
 
 private:
   struct ClientConn;
@@ -70,6 +72,7 @@ private:
 
   CommandCallback onCommand_;
   HealthCallback onHealth_;
+  ApiCallback onApi_;
 };
 
 } // namespace netpulse

@@ -1,6 +1,9 @@
 @echo off
 setlocal
 
+set "APP_VER=%~1"
+if not defined APP_VER set "APP_VER=1.0.0"
+
 where cl >nul 2>&1
 if not errorlevel 1 goto :msvc_ready
 
@@ -40,23 +43,32 @@ if errorlevel 1 (
 set "ROOT=%~dp0"
 if not exist "%ROOT%build" mkdir "%ROOT%build"
 
-echo [Build] Compiling netpulse.exe (C++20 /O2)...
+echo [Build] Compiling icon resource...
+rc /nologo /fo "%ROOT%build\netpulse.res" "%ROOT%src\netpulse.rc"
+if errorlevel 1 exit /b 1
+
+echo [Build] Compiling netpulse.exe v%APP_VER% (C++20 /O2)...
 cl /nologo /std:c++20 /O2 /EHsc /W4 /utf-8 ^
+  /DNETPULSE_VERSION="\"%APP_VER%\"" ^
   /Fo"%ROOT%build\\" /Fe"%ROOT%build\netpulse.exe" ^
   "%ROOT%src\main.cpp" ^
   "%ROOT%src\net_monitor.cpp" ^
   "%ROOT%src\geo_dns.cpp" ^
   "%ROOT%src\ws_server.cpp" ^
+  "%ROOT%src\updater.cpp" ^
+  "%ROOT%build\netpulse.res" ^
   ws2_32.lib iphlpapi.lib winhttp.lib bcrypt.lib crypt32.lib shell32.lib
 if errorlevel 1 exit /b 1
 
 echo [Build] Compiling test_core.exe...
 cl /nologo /std:c++20 /O2 /EHsc /W4 /utf-8 ^
+  /DNETPULSE_VERSION="\"%APP_VER%\"" ^
   /Fo"%ROOT%build\\" /Fe"%ROOT%build\test_core.exe" ^
   "%ROOT%tests\test_core.cpp" ^
   "%ROOT%src\net_monitor.cpp" ^
   "%ROOT%src\geo_dns.cpp" ^
   "%ROOT%src\ws_server.cpp" ^
+  "%ROOT%src\updater.cpp" ^
   ws2_32.lib iphlpapi.lib winhttp.lib bcrypt.lib crypt32.lib
 if errorlevel 1 exit /b 1
 

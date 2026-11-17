@@ -294,25 +294,52 @@ bool spawnDetachedInstallerTrampoline(const std::filesystem::path& installerPath
   wchar_t tempDir[MAX_PATH] = {};
   if (GetTempPathW(MAX_PATH, tempDir) == 0) return false;
 
+  auto escapePsSingle = [](std::string s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (char c : s) {
+      if (c == '\'') out += "''";
+      else out.push_back(c);
+    }
+    return out;
+  };
+
   const DWORD pid = GetCurrentProcessId();
-  std::filesystem::path scriptPath = std::filesystem::path(tempDir) / "netpulse_self_update.ps1";
+  const std::filesystem::path tempPath(tempDir);
+  const std::filesystem::path scriptPath = tempPath / "netpulse_self_update.ps1";
+  const std::filesystem::path logPath = tempPath / "netpulse_update.log";
+  const std::filesystem::path innoLogPath = tempPath / "netpulse_inno_update.log";
+
   {
     std::ofstream ps(scriptPath, std::ios::trunc);
     if (!ps.is_open()) return false;
-    ps << "$ErrorActionPreference = 'SilentlyContinue'\n"
-       << "Wait-Process -Id " << pid << " -Timeout 15\n"
-       << "Start-Sleep -Milliseconds 400\n"
-       << "$p = Start-Process -FilePath '" << installerPath.string() << "' -ArgumentList '/SILENT','/NORESTART' -Wait -PassThru\n"
-       << "$installed = $null\n"
-       << "foreach ($root in @('HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{8A4E9C21-6F3B-4B7A-9E12-3D5C7F8A1B40}_is1','HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{8A4E9C21-6F3B-4B7A-9E12-3D5C7F8A1B40}_is1')) {\n"
-       << "  $prop = Get-ItemProperty -Path $root -ErrorAction SilentlyContinue\n"
-       << "  if ($prop -and $prop.InstallLocation) {\n"
-       << "    $cand = Join-Path $prop.InstallLocation 'netpulse.exe'\n"
-       << "    if (Test-Path $cand) { $installed = $cand; break }\n"
+    ps << "$ErrorActionPreference = 'Continue'\n"
+       << "$log = '" << escapePsSingle(logPath.string()) << "'\n"
+       << "try {\n"
+       << "  Set-Content -Path $log -Value ('[' + (Get-Date -Format s) + '] Waiting PID " << pid << "...')\n"
+       << "  for ($i = 0; $i -lt 75; $i++) {\n"
+       << "    if (-not (Get-Process -Id " << pid << " -ErrorAction SilentlyContinue)) { break }\n"
+       << "    Start-Sleep -Milliseconds 200\n"
        << "  }\n"
-       << "}\n"
-       << "if (-not $installed) { $installed = '" << currentExePath.string() << "' }\n"
-       << "if (Test-Path $installed) { Start-Process -FilePath $installed }\n";
+       << "  Start-Sleep -Milliseconds 600\n"
+       << "  Add-Content -Path $log -Value ('[' + (Get-Date -Format s) + '] Running installer...')\n"
+       << "  $p = Start-Process -FilePath '" << escapePsSingle(installerPath.string())
+       << "' -ArgumentList '/SILENT','/NORESTART','/CLOSEAPPLICATIONS','/LOG=" << escapePsSingle(innoLogPath.string()) << "' -Wait -PassThru\n"
+       << "  Add-Content -Path $log -Value ('[' + (Get-Date -Format s) + '] Installer exit=' + $p.ExitCode)\n"
+       << "  $installed = $null\n"
+       << "  foreach ($root in @('HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{8A4E9C21-6F3B-4B7A-9E12-3D5C7F8A1B40}_is1','HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{8A4E9C21-6F3B-4B7A-9E12-3D5C7F8A1B40}_is1')) {\n"
+       << "    $prop = Get-ItemProperty -Path $root -ErrorAction SilentlyContinue\n"
+       << "    if ($prop -and $prop.InstallLocation) {\n"
+       << "      $cand = Join-Path $prop.InstallLocation 'netpulse.exe'\n"
+       << "      if (Test-Path $cand) { $installed = $cand; break }\n"
+       << "    }\n"
+       << "  }\n"
+       << "  if (-not $installed) { $installed = '" << escapePsSingle(currentExePath.string()) << "' }\n"
+       << "  Add-Content -Path $log -Value ('[' + (Get-Date -Format s) + '] Launching ' + $installed)\n"
+       << "  if (Test-Path $installed) { Start-Process -FilePath $installed }\n"
+       << "} catch {\n"
+       << "  Add-Content -Path $log -Value ('[ERROR] ' + $_.Exception.Message)\n"
+       << "}\n";
   }
 
   std::wstring cmd = L"powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" +
@@ -321,7 +348,7 @@ bool spawnDetachedInstallerTrampoline(const std::filesystem::path& installerPath
   si.cb = sizeof(si);
   PROCESS_INFORMATION pi{};
   BOOL ok = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE,
-                           DETACHED_PROCESS | CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+                           CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
   if (ok) {
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);

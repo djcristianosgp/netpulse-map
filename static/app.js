@@ -45,6 +45,7 @@ function stateBadgeClass(c) {
 const state = {
   paused: false,
   snapshot: null,
+  initialVersion: null,
   viewMode: 'local',    // 'local' | 'global'
   tab: 'conns',         // 'conns' | 'procs' | 'countries'
   globalTab: 'services',// 'services' | 'continents'
@@ -769,6 +770,12 @@ function connectWebSocket() {
     if (state.paused) return;
     try {
       const data = JSON.parse(ev.data);
+      if (!state.initialVersion && data.version) {
+        state.initialVersion = data.version;
+      } else if (state.initialVersion && data.version && data.version !== state.initialVersion) {
+        window.location.reload();
+        return;
+      }
       state.snapshot = data;
       state.rxHistory.push(data.nic?.rxBps || 0);
       state.rxHistory.shift();

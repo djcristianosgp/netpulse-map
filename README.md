@@ -19,7 +19,7 @@ Ou dê duplo clique em `run.bat` (abre automaticamente em janela dedicada `--app
 
 Opções de linha de comando:
 - `--port 8740`: define a porta local (padrão `8740`)
-- `--interval 300`: intervalo de leitura em milissegundos (`100` a `5000`)
+- `--interval 1000`: intervalo de leitura em milissegundos (`100` a `5000`, padrão `1000`)
 - `--no-browser`: inicia apenas o servidor sem abrir janela
 - `--browser-tab`: abre em aba normal do navegador padrão em vez de janela `--app`
 

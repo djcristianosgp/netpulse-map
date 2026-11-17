@@ -144,7 +144,7 @@ std::string extractSimpleJsonField(const std::string& body, const std::string& k
 
 int main(int argc, char** argv) {
   uint16_t port = 8740;
-  std::atomic<uint32_t> intervalMs{300};
+  std::atomic<uint32_t> intervalMs{1000};
   bool openBrowser = true;
   bool useAppMode = true;
 

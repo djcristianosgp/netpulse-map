@@ -335,8 +335,10 @@ bool spawnDetachedInstallerTrampoline(const std::filesystem::path& installerPath
        << "    }\n"
        << "  }\n"
        << "  if (-not $installed) { $installed = '" << escapePsSingle(currentExePath.string()) << "' }\n"
-       << "  Add-Content -Path $log -Value ('[' + (Get-Date -Format s) + '] Launching ' + $installed)\n"
-       << "  if (Test-Path $installed) { Start-Process -FilePath $installed }\n"
+       << "  $hasOpenWin = Get-Process msedge,chrome -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like 'NetPulse 2D*' }\n"
+       << "  $launchArgs = if ($hasOpenWin) { @('--wait-slot','--no-browser') } else { @('--wait-slot') }\n"
+       << "  Add-Content -Path $log -Value ('[' + (Get-Date -Format s) + '] Launching ' + $installed + ' ' + ($launchArgs -join ' '))\n"
+       << "  if (Test-Path $installed) { Start-Process -FilePath $installed -ArgumentList $launchArgs }\n"
        << "} catch {\n"
        << "  Add-Content -Path $log -Value ('[ERROR] ' + $_.Exception.Message)\n"
        << "}\n";

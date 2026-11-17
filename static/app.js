@@ -1105,6 +1105,11 @@ async function init() {
     e.currentTarget.classList.toggle('active', mapCanvas.showLabels);
   });
 
+  $('btnAnimations').addEventListener('click', (e) => {
+    mapCanvas.showAnimations = !mapCanvas.showAnimations;
+    e.currentTarget.classList.toggle('active', mapCanvas.showAnimations);
+  });
+
   $('intervalSelect').addEventListener('change', (e) => {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(`interval:${e.target.value}`);
@@ -1123,8 +1128,8 @@ async function init() {
   };
   $('btnPause').addEventListener('click', togglePause);
 
-  $('btnReset').addEventListener('click', () => mapCanvas.fitPlanet());
-  $('btnZoomFit').addEventListener('click', () => mapCanvas.fitPlanet());
+  $('btnReset').addEventListener('click', () => mapCanvas.fitPlanet(true));
+  $('btnZoomFit').addEventListener('click', () => mapCanvas.fitPlanet(true));
   $('btnZoomIn').addEventListener('click', () => mapCanvas.zoomBy(1.35));
   $('btnZoomOut').addEventListener('click', () => mapCanvas.zoomBy(1 / 1.35));
 

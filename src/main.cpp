@@ -96,7 +96,49 @@ std::filesystem::path resolveDataDir(const std::filesystem::path& rootDir) {
   return localData;
 }
 
+bool focusExistingMapWindow() {
+  HWND found = nullptr;
+  EnumWindows(
+      [](HWND hwnd, LPARAM lParam) -> BOOL {
+        if (!IsWindowVisible(hwnd)) return TRUE;
+        wchar_t title[256] = {};
+        if (GetWindowTextW(hwnd, title, static_cast<int>(std::size(title))) <= 0) return TRUE;
+        if (wcsncmp(title, L"NetPulse 2D", 11) != 0) return TRUE;
+
+        DWORD pid = 0;
+        GetWindowThreadProcessId(hwnd, &pid);
+        HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (!hProc) return TRUE;
+        wchar_t exe[MAX_PATH] = {};
+        DWORD sz = static_cast<DWORD>(std::size(exe));
+        bool isBrowser = false;
+        if (QueryFullProcessImageNameW(hProc, 0, exe, &sz)) {
+          std::wstring p(exe, sz);
+          for (auto& ch : p) ch = static_cast<wchar_t>(towlower(ch));
+          isBrowser = (p.find(L"msedge.exe") != std::wstring::npos ||
+                       p.find(L"chrome.exe") != std::wstring::npos);
+        }
+        CloseHandle(hProc);
+        if (isBrowser) {
+          *reinterpret_cast<HWND*>(lParam) = hwnd;
+          return FALSE;
+        }
+        return TRUE;
+      },
+      reinterpret_cast<LPARAM>(&found));
+
+  if (found) {
+    if (IsIconic(found)) ShowWindow(found, SW_RESTORE);
+    SetForegroundWindow(found);
+    return true;
+  }
+  return false;
+}
+
 void launchAppWindow(const std::string& url, bool useAppMode) {
+  if (useAppMode && focusExistingMapWindow()) {
+    return;
+  }
   if (useAppMode) {
     const wchar_t* candidates[] = {
         L"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",

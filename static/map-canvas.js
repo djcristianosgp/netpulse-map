@@ -82,10 +82,21 @@ export class PlanetMapCanvas {
     this.showArcs = true;
     this.showLan = false;
     this.showLabels = true;
+    this.showAnimations = true;
     this.viewMode = 'local'; // 'local' | 'global'
 
     this.nodes = [];
     this.lanNodes = [];
+    this.ripples = []; // expanding sonar shockwaves on new connections
+    this.prevNodeCounts = new Map();
+    this.stars = Array.from({ length: 85 }, (_, i) => ({
+      rx: ((i * 73 + 19) % 997) / 997,
+      ry: ((i * 137 + 43) % 991) / 991,
+      r: 0.6 + ((i * 29) % 12) / 10,
+      phase: i * 1.1,
+      speed: 0.7 + ((i * 17) % 15) / 10,
+    }));
+    this.hasIntroPlayed = false;
     this.services = [];
     this.backboneArcs = [];
     this.traceRoute = null; // { targetIp, hops: [{ttl, ip, rttMs, lat, lon, label}], segments: [...] }
@@ -119,7 +130,7 @@ export class PlanetMapCanvas {
   setFeatures(features) {
     this.features = features;
     this.baseLayerDirty = true;
-    this.fitPlanet();
+    this.fitPlanet(true);
   }
 
   setProjection(id) {
@@ -146,16 +157,31 @@ export class PlanetMapCanvas {
     };
   }
 
-  fitPlanet() {
+  fitPlanet(animate = false) {
     const pad = this.getSafePadding();
     const availW = Math.max(240, this.viewW - pad.left - pad.right);
     const availH = Math.max(200, this.viewH - pad.top - pad.bottom);
     const wh = this.worldHeight();
     const scale = Math.min(availW / WORLD_W, availH / wh) * 0.96;
-    this.zoom = Math.max(0.4, scale);
-    this.panX = pad.left + (availW - WORLD_W * this.zoom) * 0.5;
-    this.panY = pad.top + (availH - wh * this.zoom) * 0.5;
-    this.targetCamera = null;
+    const targetZoom = Math.max(0.4, scale);
+    const targetPanX = pad.left + (availW - WORLD_W * targetZoom) * 0.5;
+    const targetPanY = pad.top + (availH - wh * targetZoom) * 0.5;
+
+    if (animate && this.showAnimations) {
+      if (!this.hasIntroPlayed) {
+        this.hasIntroPlayed = true;
+        this.zoom = targetZoom * 0.78;
+        this.panX = pad.left + (availW - WORLD_W * this.zoom) * 0.5;
+        this.panY = pad.top + (availH - wh * this.zoom) * 0.5;
+      }
+      this.targetCamera = { zoom: targetZoom, panX: targetPanX, panY: targetPanY };
+    } else {
+      this.zoom = targetZoom;
+      this.panX = targetPanX;
+      this.panY = targetPanY;
+      this.targetCamera = null;
+    }
+    this.callbacks.onZoomChange?.(this.zoom);
   }
 
   zoomBy(factor, cx = this.viewW * 0.5, cy = this.viewH * 0.5) {
@@ -258,6 +284,9 @@ export class PlanetMapCanvas {
     const hostLon = this.host.lon;
     const hostLat = this.host.lat;
     const nextNodes = [];
+    const nextCounts = new Map();
+    const nowPerf = performance.now();
+
     for (const node of nodeMap.values()) {
       node.segments = buildGreatCircleSegments(hostLon, hostLat, node.lon, node.lat, 36);
       node.life = node.hasNew ? 'new' : node.allClosed ? 'closed' : 'active';
@@ -265,8 +294,21 @@ export class PlanetMapCanvas {
         ? colorForState('ESTABLISHED', node.life)
         : colorForState(node.dominantState, node.life);
       nextNodes.push(node);
+
+      const prevCount = this.prevNodeCounts.get(node.key) || 0;
+      nextCounts.set(node.key, node.conns.length);
+      if (this.showAnimations && (node.hasNew || node.conns.length > prevCount) && this.ripples.length < 40) {
+        this.ripples.push({
+          lat: node.lat,
+          lon: node.lon,
+          color: node.color,
+          bornMs: nowPerf,
+          durationMs: 1400,
+        });
+      }
     }
 
+    this.prevNodeCounts = nextCounts;
     this.nodes = nextNodes;
     this.lanNodes = lanList;
     this.countryCounts = countryTotals;
@@ -573,14 +615,42 @@ export class PlanetMapCanvas {
     ctx.save();
     ctx.scale(this.dpr, this.dpr);
 
-    // Deep space background
+    // Deep space background + twinkling starfield
     ctx.fillStyle = '#030712';
     ctx.fillRect(0, 0, this.viewW, this.viewH);
+
+    if (this.showAnimations) {
+      for (const st of this.stars) {
+        const a = 0.16 + 0.34 * (0.5 + 0.5 * Math.sin(timeSec * st.speed + st.phase));
+        ctx.fillStyle = `rgba(186, 230, 253, ${a.toFixed(2)})`;
+        ctx.beginPath();
+        ctx.arc(st.rx * this.viewW, st.ry * this.viewH, st.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
 
     // Draw cached world map
     const drawW = WORLD_W * this.zoom;
     const drawH = this.worldHeight() * this.zoom;
     ctx.drawImage(this.baseLayerCanvas, this.panX, this.panY, drawW, drawH);
+
+    // Subtle longitude radar telemetry sweep across planet
+    if (this.showAnimations) {
+      const scanLon = -180 + ((timeSec * 26) % 360);
+      ctx.save();
+      ctx.beginPath();
+      for (let lat = -90; lat <= 90; lat += 6) {
+        const [sx, sy] = this.projectToScreen(scanLon, lat);
+        if (lat === -90) ctx.moveTo(sx, sy);
+        else ctx.lineTo(sx, sy);
+      }
+      ctx.strokeStyle = 'rgba(34, 211, 238, 0.16)';
+      ctx.lineWidth = 2;
+      ctx.shadowColor = '#22d3ee';
+      ctx.shadowBlur = 12;
+      ctx.stroke();
+      ctx.restore();
+    }
 
     // Crisp vector border pass when zoomed in closely
     if (this.zoom > 2.6 && this.features.length > 0) {
@@ -596,18 +666,14 @@ export class PlanetMapCanvas {
       }
     }
 
-    // Active country shading (subtle tint for countries with active connections)
+    // Active country shading (subtle breathing tint for countries with active connections)
     if (this.countryCounts.size > 0) {
+      const breath = this.showAnimations ? 0.06 + 0.04 * (0.5 + 0.5 * Math.sin(timeSec * 2.1)) : 0.08;
+      const fillCol = `rgba(34, 211, 238, ${breath.toFixed(3)})`;
       for (const f of this.features) {
         const count = this.countryCounts.get(f.name.toLowerCase());
         if (count) {
-          this.drawCountryFeature(
-            ctx,
-            f,
-            'rgba(34, 211, 238, 0.08)',
-            'rgba(34, 211, 238, 0.35)',
-            1.0
-          );
+          this.drawCountryFeature(ctx, f, fillCol, 'rgba(34, 211, 238, 0.35)', 1.0);
         }
       }
     }
@@ -640,8 +706,68 @@ export class PlanetMapCanvas {
       this.renderLocalLayer(ctx, timeSec);
     }
 
+    this.renderRipples(ctx);
     this.renderTraceOverlay(ctx, timeSec);
 
+    ctx.restore();
+  }
+
+  drawCometTrail(ctx, pts, phase, color, headRadius = 2.6, reverse = false) {
+    if (!pts || pts.length < 2) return;
+    const p = reverse ? 1 - phase : phase;
+    const n = pts.length - 1;
+    const tailLen = 6;
+    ctx.save();
+    for (let t = tailLen; t >= 0; t--) {
+      const tp = p - (reverse ? -1 : 1) * (t * 0.015);
+      if (tp < 0 || tp > 1) continue;
+      const idx = Math.min(n, Math.max(0, Math.floor(tp * n)));
+      const [px, py] = pts[idx];
+      const frac = 1 - t / (tailLen + 1);
+      ctx.beginPath();
+      ctx.arc(px, py, Math.max(0.8, headRadius * frac), 0, Math.PI * 2);
+      ctx.fillStyle = t === 0 ? '#f0f9ff' : color;
+      ctx.globalAlpha = t === 0 ? 0.98 : frac * 0.55;
+      if (t === 0) {
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 10;
+      } else {
+        ctx.shadowBlur = 0;
+      }
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  renderRipples(ctx) {
+    if (!this.showAnimations || this.ripples.length === 0) return;
+    const now = performance.now();
+    ctx.save();
+    for (let i = this.ripples.length - 1; i >= 0; i--) {
+      const rp = this.ripples[i];
+      const t = (now - rp.bornMs) / rp.durationMs;
+      if (t >= 1) {
+        this.ripples.splice(i, 1);
+        continue;
+      }
+      const [rx, ry] = this.projectToScreen(rp.lon, rp.lat);
+      const radius = 5 + t * 28;
+      ctx.beginPath();
+      ctx.arc(rx, ry, radius, 0, Math.PI * 2);
+      ctx.strokeStyle = rp.color;
+      ctx.globalAlpha = (1 - t) * 0.75;
+      ctx.lineWidth = 1.8 * (1 - t) + 0.5;
+      ctx.stroke();
+
+      if (t > 0.2) {
+        const t2 = (t - 0.2) / 0.8;
+        ctx.beginPath();
+        ctx.arc(rx, ry, 5 + t2 * 20, 0, Math.PI * 2);
+        ctx.globalAlpha = (1 - t2) * 0.45;
+        ctx.lineWidth = 1.0;
+        ctx.stroke();
+      }
+    }
     ctx.restore();
   }
 
@@ -771,21 +897,11 @@ export class PlanetMapCanvas {
       }
       ctx.restore();
 
-      // Bidirectional pulses along intercontinental corridors
-      if (!aDown && pts.length >= 2) {
+      // Bidirectional comet pulses along intercontinental corridors
+      if (this.showAnimations && !aDown && pts.length >= 2) {
         for (let dir = 0; dir < 2; dir++) {
-          const rawPhase = (timeSec * 0.24 + bIdx * 0.17 + dir * 0.5) % 1;
-          const phase = dir === 0 ? rawPhase : 1 - rawPhase;
-          const idx = Math.min(pts.length - 1, Math.floor(phase * (pts.length - 1)));
-          const [px, py] = pts[idx];
-          ctx.save();
-          ctx.beginPath();
-          ctx.arc(px, py, isHot ? 3.2 : 2.3, 0, Math.PI * 2);
-          ctx.fillStyle = dir === 0 ? '#67e8f9' : '#6ee7b7';
-          ctx.shadowColor = col;
-          ctx.shadowBlur = 8;
-          ctx.fill();
-          ctx.restore();
+          const phase = (timeSec * 0.22 + bIdx * 0.17 + dir * 0.5) % 1;
+          this.drawCometTrail(ctx, pts, phase, dir === 0 ? '#67e8f9' : '#6ee7b7', isHot ? 3.2 : 2.4, dir === 1);
         }
       }
     }
@@ -917,23 +1033,14 @@ export class PlanetMapCanvas {
         }
         ctx.restore();
 
-        // Animated packet pulse traveling along the longest arc segment
-        if (node.life !== 'closed' && totalSegPts.length >= 2) {
-          const speed = 0.28 + Math.min(0.45, node.conns.length * 0.05);
-          const phase = (timeSec * speed + (Math.abs(node.lon) % 1)) % 1;
-          const idx = Math.min(
-            totalSegPts.length - 1,
-            Math.floor(phase * (totalSegPts.length - 1))
-          );
-          const [px, py] = totalSegPts[idx];
-          ctx.save();
-          ctx.beginPath();
-          ctx.arc(px, py, isHot ? 3.5 : 2.3, 0, Math.PI * 2);
-          ctx.fillStyle = '#e0f2fe';
-          ctx.shadowColor = node.color;
-          ctx.shadowBlur = 10;
-          ctx.fill();
-          ctx.restore();
+        // Animated comet-tail packet pulses traveling along the geodesic arc
+        if (this.showAnimations && node.life !== 'closed' && totalSegPts.length >= 2) {
+          const speed = 0.26 + Math.min(0.48, node.conns.length * 0.045);
+          const packetCount = node.conns.length >= 4 || node.totalBps > 50000 ? 2 : 1;
+          for (let pk = 0; pk < packetCount; pk++) {
+            const phase = (timeSec * speed + (Math.abs(node.lon) % 1) + pk * 0.5) % 1;
+            this.drawCometTrail(ctx, totalSegPts, phase, node.color, isHot ? 3.4 : 2.5, pk === 1);
+          }
         }
       }
     }

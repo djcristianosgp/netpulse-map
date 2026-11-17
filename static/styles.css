@@ -206,12 +206,17 @@ html, body {
   box-shadow: inset 0 0 0 1px rgba(34, 211, 238, 0.48);
 }
 
-.tab-bar-2 {
+.tab-bar.tab-bar-2 {
   grid-template-columns: repeat(2, 1fr);
 }
 
-.tab-bar-4 {
+.tab-bar.tab-bar-4 {
   grid-template-columns: repeat(4, 1fr);
+}
+
+.tab-bar.tab-bar-4 .tab-btn {
+  font-size: 11px;
+  padding: 5px 4px;
 }
 
 .bw-banner {

@@ -275,7 +275,9 @@ function updateKpisAndBanner(filteredConns) {
 
   const pollMs = ((snap.pollUs || 0) / 1000).toFixed(2);
   if (!state.paused) {
-    $('engineStatus').textContent = `Ao vivo · ${pollMs} ms/poll · ${snap.stats?.geoCached || 0} GeoIP cache`;
+    const mmdbTag = snap.mmdb ? ' · MMDB' : '';
+    const modeTag = snap.elevated ? ' · Admin' : '';
+    $('engineStatus').textContent = `Ao vivo · ${pollMs} ms/poll · ${snap.stats?.geoCached || 0} GeoIP${mmdbTag}${modeTag}`;
   }
 
   const banner = $('activeFiltersBanner');
@@ -366,39 +368,55 @@ function renderPanel(filteredConns = getFilteredConnections()) {
         renderPanel(filteredConns);
       });
     });
-  } else if (state.tab === 'procs') {
-    const groups = new Map();
-    for (const c of filteredConns) {
-      let grp = groups.get(c.proc);
-      if (!grp) {
-        grp = { proc: c.proc, count: 0, publicCount: 0, countries: new Set(), pids: new Set() };
-        groups.set(c.proc, grp);
-      }
-      grp.count++;
-      grp.pids.add(c.pid);
-      if (c.scope === 'public') {
-        grp.publicCount++;
-        if (geo[c.rip]?.country) grp.countries.add(geo[c.rip].country);
-      }
+  } else if (state.tab === 'bw') {
+    const procs = (snap.procs || []).filter((p) => {
+      const q = state.search.trim().toLowerCase();
+      return !q || p.proc.toLowerCase().includes(q) || String(p.pid).includes(q);
+    });
+    const maxAct = Math.max(1024, ...procs.map((p) => p.actBps || 0));
+    const isExact = snap.bwMode === 'exact_estats';
+
+    const bannerHtml = `
+      <div class="bw-banner">
+        <span>${isExact ? 'Modo: <strong>Banda Exata (EStats)</strong>' : 'Modo: <strong>I/O por Processo</strong>'}</span>
+        ${isExact ? '' : '<button class="ctrl-btn" id="btnElevateMode" style="height:24px;font-size:10.5px;padding:0 8px">Ativar Exato (Admin)</button>'}
+      </div>
+    `;
+
+    container.innerHTML =
+      bannerHtml +
+      procs
+        .map((p) => {
+          const pct = Math.min(100, Math.round(((p.actBps || 0) / maxAct) * 100));
+          const sel = state.selectedProcess === p.proc ? 'selected' : '';
+          const rateTxt = isExact
+            ? `↓${formatBytesPerSec(p.rxBps)} ↑${formatBytesPerSec(p.txBps)}`
+            : formatBytesPerSec(p.actBps);
+          return `
+            <div class="list-item ${sel}" data-proc="${escHtml(p.proc)}">
+              <div class="item-top">
+                <span class="item-proc">${escHtml(p.proc)} <span style="color:var(--text-muted);font-weight:400">#${p.pid}</span></span>
+                <span class="state-pill">${escHtml(rateTxt)}</span>
+              </div>
+              <div class="item-sub">
+                <span>${p.conns} conex. (${p.pub} públicas)</span>
+                <span>${pct}% rel.</span>
+              </div>
+              <div class="bw-bar-track"><div class="bw-bar-fill" style="width:${pct}%"></div></div>
+            </div>
+          `;
+        })
+        .join('');
+
+    const elevBtn = $('btnElevateMode');
+    if (elevBtn) {
+      elevBtn.onclick = async () => {
+        if (!confirm('Reiniciar NetPulse 2D como Administrador para habilitar leitura exata de bytes/s por socket (TcpConnectionEstatsData)?')) return;
+        try {
+          await fetch('/api/elevate', { method: 'POST' });
+        } catch {}
+      };
     }
-    const sorted = Array.from(groups.values()).sort((a, b) => b.count - a.count);
-    container.innerHTML = sorted
-      .map((g) => {
-        const sel = state.selectedProcess === g.proc ? 'selected' : '';
-        return `
-          <div class="list-item ${sel}" data-proc="${escHtml(g.proc)}">
-            <div class="item-top">
-              <span class="item-proc">${escHtml(g.proc)}</span>
-              <span class="state-pill">${g.count} conex.</span>
-            </div>
-            <div class="item-sub">
-              <span>${g.publicCount} públicas · ${g.countries.size} países</span>
-              <span>PID: ${Array.from(g.pids).slice(0, 3).join(', ')}</span>
-            </div>
-          </div>
-        `;
-      })
-      .join('');
 
     container.querySelectorAll('[data-proc]').forEach((el) => {
       el.addEventListener('click', () => {
@@ -409,6 +427,9 @@ function renderPanel(filteredConns = getFilteredConnections()) {
         applyAndRender();
       });
     });
+  } else if (state.tab === 'history') {
+    renderHistoryPanel(container);
+    return;
   } else if (state.tab === 'countries') {
     const groups = new Map();
     for (const c of filteredConns) {
@@ -561,6 +582,176 @@ function renderGlobalPanel(container, snap) {
   container.scrollTop = prevScroll;
 }
 
+let lastHistoryFetchMs = 0;
+
+async function renderHistoryPanel(container) {
+  const now = Date.now();
+  if (now - lastHistoryFetchMs < 2000 && container.dataset.hasHistory === '1') return;
+  lastHistoryFetchMs = now;
+
+  try {
+    const resp = await fetch('/api/history/events');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const events = data.events || [];
+    const alertsOn = !!data.alertsEnabled;
+
+    const headerHtml = `
+      <div class="bw-banner">
+        <span>Notificações na Bandeja</span>
+        <button class="ctrl-btn ${alertsOn ? 'active' : ''}" id="btnToggleTrayAlerts" style="height:24px;font-size:10.5px;padding:0 8px">
+          ${alertsOn ? 'Ativadas' : 'Silenciadas'}
+        </button>
+      </div>
+    `;
+
+    const listHtml =
+      events.length === 0
+        ? '<div class="list-item"><div class="item-sub">Nenhum alerta ou evento registrado ainda.</div></div>'
+        : events
+            .map((e) => {
+              const cls = e.sev === 'critical' ? 'closed' : e.sev === 'warn' ? 'syn' : 'new';
+              const dt = new Date(e.ts).toLocaleTimeString('pt-BR');
+              return `
+                <div class="list-item">
+                  <div class="item-top">
+                    <span class="item-proc">${escHtml(e.title)}</span>
+                    <span class="state-pill ${cls}">${escHtml(dt)}</span>
+                  </div>
+                  <div class="item-geo">${escHtml(e.detail)}</div>
+                </div>
+              `;
+            })
+            .join('');
+
+    container.innerHTML = headerHtml + listHtml;
+    container.dataset.hasHistory = '1';
+
+    const tbtn = $('btnToggleTrayAlerts');
+    if (tbtn) {
+      tbtn.onclick = async () => {
+        await fetch('/api/alerts/toggle', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: !alertsOn }),
+        });
+        lastHistoryFetchMs = 0;
+        renderHistoryPanel(container);
+      };
+    }
+  } catch {}
+}
+
+function drawServiceSparkline(canvas, points) {
+  if (!canvas || !points || points.length < 2) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  const maxMs = Math.max(50, ...points.map((p) => p.ms || 0));
+  ctx.beginPath();
+  for (let i = 0; i < points.length; i++) {
+    const x = (i / (points.length - 1)) * (w - 8) + 4;
+    const y = h - 6 - ((points[i].ms || 0) / maxMs) * (h - 12);
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.strokeStyle = '#22d3ee';
+  ctx.lineWidth = 1.8;
+  ctx.stroke();
+
+  for (let i = 0; i < points.length; i++) {
+    if (points[i].status === 'down') {
+      const x = (i / (points.length - 1)) * (w - 8) + 4;
+      ctx.fillStyle = '#f43f5e';
+      ctx.fillRect(x - 1.5, 4, 3, h - 8);
+    }
+  }
+}
+
+let tracePollTimer = null;
+
+async function startVisualTraceroute(targetIp, hostDiv) {
+  if (tracePollTimer) {
+    clearInterval(tracePollTimer);
+    tracePollTimer = null;
+  }
+  hostDiv.innerHTML = `<div class="item-sub">Rastreando saltos ICMP para ${escHtml(targetIp)}...</div>`;
+  try {
+    await fetch('/api/trace/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ip: targetIp }),
+    });
+  } catch {
+    hostDiv.innerHTML = `<div class="item-sub">Erro ao iniciar traceroute.</div>`;
+    return;
+  }
+
+  const poll = async () => {
+    try {
+      const resp = await fetch('/api/trace/status');
+      if (!resp.ok) return;
+      const tr = await resp.json();
+      const hops = tr.hops || [];
+
+      const geoHops = [];
+      for (const h of hops) {
+        if (h.geo && typeof h.geo.lat === 'number' && typeof h.geo.lon === 'number') {
+          geoHops.push({
+            ttl: h.ttl,
+            ip: h.ip,
+            rttMs: h.rttMs,
+            lat: h.geo.lat,
+            lon: h.geo.lon,
+            label: h.geo.city || h.geo.country || h.ip,
+          });
+        }
+      }
+      mapCanvas.setTraceRoute(tr.targetIp, geoHops);
+
+      hostDiv.innerHTML = `
+        <div class="insp-section-title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Rota ICMP (${tr.running ? 'rastreando...' : 'concluído'})</span>
+          <button class="svc-del-btn" id="btnClearTrace">Limpar</button>
+        </div>
+        <div>
+          ${hops
+            .map((h) => {
+              const place = h.geo ? `${h.geo.city ? h.geo.city + ', ' : ''}${h.geo.cc}` : h.host || '';
+              return `
+                <div class="hop-row">
+                  <span class="hop-ttl">#${h.ttl}</span>
+                  <div>
+                    <div>${h.timedOut ? '* * *' : escHtml(h.ip)}</div>
+                    ${place ? `<div class="hop-geo">${escHtml(place)}</div>` : ''}
+                  </div>
+                  <span class="hop-rtt">${h.timedOut ? '—' : h.rttMs.toFixed(0) + ' ms'}</span>
+                </div>`;
+            })
+            .join('')}
+        </div>
+      `;
+      const clr = $('btnClearTrace');
+      if (clr) {
+        clr.onclick = () => {
+          mapCanvas.clearTraceRoute();
+          hostDiv.innerHTML = '';
+        };
+      }
+
+      if (!tr.running && tracePollTimer) {
+        clearInterval(tracePollTimer);
+        tracePollTimer = null;
+      }
+    } catch {}
+  };
+
+  poll();
+  tracePollTimer = setInterval(poll, 450);
+}
+
 function openServiceInspector(s) {
   const meta = serviceStatusMeta(s.status);
   const localConns =
@@ -583,7 +774,26 @@ function openServiceInspector(s) {
       <div class="kv-k">Localidade</div><div class="kv-v">${escHtml(s.region)} (${s.lat.toFixed(2)}, ${s.lon.toFixed(2)})</div>
       ${localConns !== null ? `<div class="kv-k">Suas Conexões</div><div class="kv-v">${localConns} ativas neste continente</div>` : ''}
     </div>
+    <div class="insp-section-title">Histórico de Latência (RTT)</div>
+    <canvas id="svcSparkCanvas" class="svc-spark" width="308" height="56"></canvas>
+    ${s.ip ? `<div class="insp-actions"><button class="action-btn" id="btnTraceSvc">🧭 Rastrear Rota</button></div><div id="inspTraceBox"></div>` : ''}
   `;
+
+  fetch('/api/history/service', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: s.id }),
+  })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((d) => {
+      if (d && d.points) drawServiceSparkline($('svcSparkCanvas'), d.points);
+    })
+    .catch(() => {});
+
+  const traceBtn = $('btnTraceSvc');
+  if (traceBtn && s.ip) {
+    traceBtn.onclick = () => startVisualTraceroute(s.ip, $('inspTraceBox'));
+  }
 }
 
 function openConnectionInspector(c) {
@@ -596,6 +806,8 @@ function openConnectionInspector(c) {
   $('inspEyebrow').textContent = `${c.protocol} IPv${c.v} · ${c.state}`;
   $('inspTitle').textContent = c.proc;
 
+  const hasBw = (c.rxBps || 0) > 0 || (c.txBps || 0) > 0;
+
   $('inspBody').innerHTML = `
     <div class="kv-grid">
       <div class="kv-k">Processo</div><div class="kv-v">${escHtml(c.proc)} (PID ${c.pid})</div>
@@ -605,7 +817,15 @@ function openConnectionInspector(c) {
       <div class="kv-k">Hostname (PTR)</div><div class="kv-v">${escHtml(host || '—')}</div>
       <div class="kv-k">Escopo</div><div class="kv-v">${escHtml(c.scope.toUpperCase())}</div>
       <div class="kv-k">Duração</div><div class="kv-v">${formatAge(c.ageMs)}</div>
+      ${hasBw ? `<div class="kv-k">Tráfego</div><div class="kv-v">↓ ${formatBytesPerSec(c.rxBps)} · ↑ ${formatBytesPerSec(c.txBps)}</div>` : ''}
     </div>
+    <div class="insp-actions">
+      ${c.scope === 'public' ? '<button class="action-btn" id="btnTraceConn">🧭 Rastrear Rota</button>' : ''}
+      ${c.scope === 'public' ? '<button class="action-btn danger" id="btnBlockIp">🛡 Bloquear IP</button>' : ''}
+      ${c.pid > 4 ? '<button class="action-btn danger" id="btnKillProc">⏹ Encerrar PID</button>' : ''}
+    </div>
+    <div id="actionFeedback" class="item-geo hidden"></div>
+    <div id="inspTraceBox"></div>
     ${
       g
         ? `
@@ -620,6 +840,47 @@ function openConnectionInspector(c) {
         : ''
     }
   `;
+
+  if ($('btnTraceConn')) {
+    $('btnTraceConn').onclick = () => startVisualTraceroute(c.rip, $('inspTraceBox'));
+  }
+  if ($('btnBlockIp')) {
+    $('btnBlockIp').onclick = async () => {
+      if (!confirm(`Criar regra de bloqueio de saída no Firewall do Windows para ${c.rip}?`)) return;
+      const fb = $('actionFeedback');
+      fb.classList.remove('hidden');
+      fb.textContent = 'Aplicando regra no Firewall...';
+      try {
+        const r = await fetch('/api/action/block-ip', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ip: c.rip }),
+        });
+        const j = await r.json();
+        fb.textContent = j.ok ? `IP ${c.rip} bloqueado no Firewall.` : `Erro: ${j.error}`;
+      } catch {
+        fb.textContent = 'Falha ao comunicar com o motor.';
+      }
+    };
+  }
+  if ($('btnKillProc')) {
+    $('btnKillProc').onclick = async () => {
+      if (!confirm(`Encerrar o processo ${c.proc} (PID ${c.pid})?`)) return;
+      const fb = $('actionFeedback');
+      fb.classList.remove('hidden');
+      try {
+        const r = await fetch('/api/action/kill-process', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pid: c.pid, proc: c.proc }),
+        });
+        const j = await r.json();
+        fb.textContent = j.ok ? `Processo ${c.proc} (#${c.pid}) encerrado.` : `Erro: ${j.error}`;
+      } catch {
+        fb.textContent = 'Falha ao encerrar processo.';
+      }
+    };
+  }
 }
 
 function openNodeInspector(node) {
@@ -650,6 +911,8 @@ function openNodeInspector(node) {
     })
     .join('');
 
+  const firstIp = node.conns[0]?.rip;
+
   $('inspBody').innerHTML = `
     <div class="kv-grid">
       <div class="kv-k">País / Região</div><div class="kv-v">${escHtml([node.region, node.country].filter(Boolean).join(', '))} (${escHtml(node.cc)})</div>
@@ -657,9 +920,14 @@ function openNodeInspector(node) {
       <div class="kv-k">ISP / Org</div><div class="kv-v">${escHtml(node.isp || node.org || '—')}</div>
       <div class="kv-k">ASN</div><div class="kv-v">${escHtml(node.asn || '—')}</div>
     </div>
+    ${firstIp ? `<div class="insp-actions"><button class="action-btn" id="btnTraceNode">🧭 Rastrear Rota (${escHtml(firstIp)})</button></div><div id="inspTraceBox"></div>` : ''}
     <div class="insp-section-title">Sockets neste Nó</div>
     <div>${connsHtml}</div>
   `;
+
+  if ($('btnTraceNode') && firstIp) {
+    $('btnTraceNode').onclick = () => startVisualTraceroute(firstIp, $('inspTraceBox'));
+  }
 
   $('inspBody')
     .querySelectorAll('[data-insp-conn]')
@@ -990,6 +1258,7 @@ async function init() {
         state.selectedCountry = null;
         mapCanvas.selectedNodeKey = null;
         mapCanvas.selectedCountryName = null;
+        mapCanvas.clearTraceRoute();
         applyAndRender();
       }
       return;

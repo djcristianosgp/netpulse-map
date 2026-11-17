@@ -20,6 +20,7 @@ void runTrayMessageLoop(const std::string& url,
                         TrayCallbacks callbacks);
 
 void requestTrayQuit();
+void showTrayBalloon(const std::string& title, const std::string& body, bool isWarning);
 
 // Checks single-instance mutex; if already running, signals existing instance to reopen the map.
 bool acquireSingleInstanceOrFocusExisting(void** outMutexHandle);

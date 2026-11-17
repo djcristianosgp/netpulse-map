@@ -9,6 +9,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <iphlpapi.h>
+#include <tcpestats.h>
 #include <tlhelp32.h>
 
 #include "net_monitor.hpp"
@@ -82,6 +83,18 @@ std::string makeKey(const char* proto,
 }
 
 } // namespace
+
+bool isProcessElevated() {
+  HANDLE tok = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) return false;
+  TOKEN_ELEVATION elev{};
+  DWORD sz = sizeof(elev);
+  BOOL ok = GetTokenInformation(tok, TokenElevation, &elev, sizeof(elev), &sz);
+  CloseHandle(tok);
+  return ok && elev.TokenIsElevated != 0;
+}
+
+NetMonitor::NetMonitor() : elevated_(isProcessElevated()) {}
 
 IpScope classifyIpv4(const uint8_t b[4]) {
   if (b[0] == 0) return IpScope::Unknown;                          // 0.0.0.0/8
@@ -191,7 +204,7 @@ const char* tcpStateToString(uint32_t state) {
   }
 }
 
-void NetMonitor::pollTcp4(std::vector<SocketEntry>& out, uint32_t& listeningCount) {
+void NetMonitor::pollTcp4(std::vector<SocketEntry>& out, uint32_t& listeningCount, uint64_t nowMs) {
   ULONG size = 65536;
   std::vector<uint8_t> buf(size);
   DWORD ret = GetExtendedTcpTable(buf.data(), &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
@@ -224,11 +237,49 @@ void NetMonitor::pollTcp4(std::vector<SocketEntry>& out, uint32_t& listeningCoun
     e.pid = row.dwOwningPid;
     e.scope = scope;
     e.key = makeKey("TCP", 4, e.localIp, e.localPort, e.remoteIp, e.remotePort, e.pid);
+
+    if (elevated_ && row.dwState == MIB_TCP_STATE_ESTAB) {
+      MIB_TCPROW tcpRow{};
+      tcpRow.dwState = row.dwState;
+      tcpRow.dwLocalAddr = row.dwLocalAddr;
+      tcpRow.dwLocalPort = row.dwLocalPort;
+      tcpRow.dwRemoteAddr = row.dwRemoteAddr;
+      tcpRow.dwRemotePort = row.dwRemotePort;
+
+      auto prevIt = activeTracked_.find(e.key);
+      bool estatsOn = (prevIt != activeTracked_.end() && prevIt->second.estatsEnabled);
+      if (!estatsOn) {
+        TCP_ESTATS_DATA_RW_v0 rw{};
+        rw.EnableCollection = TRUE;
+        if (SetPerTcpConnectionEStats(&tcpRow, TcpConnectionEstatsData,
+                                      reinterpret_cast<PUCHAR>(&rw), 0, sizeof(rw), 0) == NO_ERROR) {
+          estatsOn = true;
+        }
+      }
+      if (estatsOn) {
+        TCP_ESTATS_DATA_ROD_v0 rod{};
+        if (GetPerTcpConnectionEStats(&tcpRow, TcpConnectionEstatsData,
+                                      nullptr, 0, 0,
+                                      nullptr, 0, 0,
+                                      reinterpret_cast<PUCHAR>(&rod), 0, sizeof(rod)) == NO_ERROR) {
+          if (prevIt != activeTracked_.end() && prevIt->second.prevStatsMs > 0 && nowMs > prevIt->second.prevStatsMs) {
+            double dt = static_cast<double>(nowMs - prevIt->second.prevStatsMs) / 1000.0;
+            if (dt > 0.01 && rod.DataBytesIn >= prevIt->second.prevBytesIn && rod.DataBytesOut >= prevIt->second.prevBytesOut) {
+              e.rxBps = static_cast<double>(rod.DataBytesIn - prevIt->second.prevBytesIn) / dt;
+              e.txBps = static_cast<double>(rod.DataBytesOut - prevIt->second.prevBytesOut) / dt;
+            }
+          }
+          // Temporarily stash raw totals inside firstSeenMs? No, store in activeTracked_ during merge.
+          e.firstSeenMs = rod.DataBytesIn;
+          e.lastSeenMs = rod.DataBytesOut;
+        }
+      }
+    }
     out.push_back(std::move(e));
   }
 }
 
-void NetMonitor::pollTcp6(std::vector<SocketEntry>& out, uint32_t& listeningCount) {
+void NetMonitor::pollTcp6(std::vector<SocketEntry>& out, uint32_t& listeningCount, uint64_t nowMs) {
   ULONG size = 65536;
   std::vector<uint8_t> buf(size);
   DWORD ret = GetExtendedTcpTable(buf.data(), &size, FALSE, AF_INET6, TCP_TABLE_OWNER_PID_ALL, 0);
@@ -263,6 +314,45 @@ void NetMonitor::pollTcp6(std::vector<SocketEntry>& out, uint32_t& listeningCoun
     e.pid = row.dwOwningPid;
     e.scope = scope;
     e.key = makeKey("TCP", e.ipVersion, e.localIp, e.localPort, e.remoteIp, e.remotePort, e.pid);
+
+    if (elevated_ && row.dwState == MIB_TCP_STATE_ESTAB) {
+      MIB_TCP6ROW tcp6Row{};
+      tcp6Row.State = static_cast<MIB_TCP_STATE>(row.dwState);
+      std::memcpy(&tcp6Row.LocalAddr, row.ucLocalAddr, 16);
+      tcp6Row.dwLocalScopeId = row.dwLocalScopeId;
+      tcp6Row.dwLocalPort = row.dwLocalPort;
+      std::memcpy(&tcp6Row.RemoteAddr, row.ucRemoteAddr, 16);
+      tcp6Row.dwRemoteScopeId = row.dwRemoteScopeId;
+      tcp6Row.dwRemotePort = row.dwRemotePort;
+
+      auto prevIt = activeTracked_.find(e.key);
+      bool estatsOn = (prevIt != activeTracked_.end() && prevIt->second.estatsEnabled);
+      if (!estatsOn) {
+        TCP_ESTATS_DATA_RW_v0 rw{};
+        rw.EnableCollection = TRUE;
+        if (SetPerTcp6ConnectionEStats(&tcp6Row, TcpConnectionEstatsData,
+                                       reinterpret_cast<PUCHAR>(&rw), 0, sizeof(rw), 0) == NO_ERROR) {
+          estatsOn = true;
+        }
+      }
+      if (estatsOn) {
+        TCP_ESTATS_DATA_ROD_v0 rod{};
+        if (GetPerTcp6ConnectionEStats(&tcp6Row, TcpConnectionEstatsData,
+                                       nullptr, 0, 0,
+                                       nullptr, 0, 0,
+                                       reinterpret_cast<PUCHAR>(&rod), 0, sizeof(rod)) == NO_ERROR) {
+          if (prevIt != activeTracked_.end() && prevIt->second.prevStatsMs > 0 && nowMs > prevIt->second.prevStatsMs) {
+            double dt = static_cast<double>(nowMs - prevIt->second.prevStatsMs) / 1000.0;
+            if (dt > 0.01 && rod.DataBytesIn >= prevIt->second.prevBytesIn && rod.DataBytesOut >= prevIt->second.prevBytesOut) {
+              e.rxBps = static_cast<double>(rod.DataBytesIn - prevIt->second.prevBytesIn) / dt;
+              e.txBps = static_cast<double>(rod.DataBytesOut - prevIt->second.prevBytesOut) / dt;
+            }
+          }
+          e.firstSeenMs = rod.DataBytesIn;
+          e.lastSeenMs = rod.DataBytesOut;
+        }
+      }
+    }
     out.push_back(std::move(e));
   }
 }
@@ -376,7 +466,9 @@ void NetMonitor::resolveProcessInfo(uint32_t pid,
                                     uint64_t nowMs,
                                     const std::unordered_map<uint32_t, std::string>& snapshotMap,
                                     std::string& outName,
-                                    std::string& outPath) {
+                                    std::string& outPath,
+                                    double& outIoBps) {
+  outIoBps = 0.0;
   if (pid == 0) {
     outName = "System Idle";
     outPath = "";
@@ -388,39 +480,49 @@ void NetMonitor::resolveProcessInfo(uint32_t pid,
     return;
   }
 
-  auto it = procCache_.find(pid);
-  if (it != procCache_.end() && (nowMs - it->second.lastCheckedMs) < 5000) {
-    outName = it->second.name;
-    outPath = it->second.path;
-    return;
-  }
+  auto& entry = procCache_[pid];
+  const bool needName = entry.name.empty() || (nowMs - entry.lastCheckedMs) >= 5000;
+  const bool needIo = (entry.prevIoTimeMs == 0) || (nowMs - entry.prevIoTimeMs) >= 250;
 
-  std::string name;
-  std::string path;
-
-  HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-  if (hProc) {
-    wchar_t buf[MAX_PATH * 2];
-    DWORD sz = static_cast<DWORD>(std::size(buf));
-    if (QueryFullProcessImageNameW(hProc, 0, buf, &sz)) {
-      path = wideToUtf8(buf, static_cast<int>(sz));
-      name = basenameFromPath(path);
+  if (needName || needIo) {
+    HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (hProc) {
+      if (needName) {
+        wchar_t buf[MAX_PATH * 2];
+        DWORD sz = static_cast<DWORD>(std::size(buf));
+        if (QueryFullProcessImageNameW(hProc, 0, buf, &sz)) {
+          entry.path = wideToUtf8(buf, static_cast<int>(sz));
+          entry.name = basenameFromPath(entry.path);
+        }
+        entry.lastCheckedMs = nowMs;
+      }
+      if (needIo) {
+        IO_COUNTERS io{};
+        if (GetProcessIoCounters(hProc, &io)) {
+          const uint64_t totalBytes = io.ReadTransferCount + io.WriteTransferCount + io.OtherTransferCount;
+          if (entry.prevIoTimeMs > 0 && nowMs > entry.prevIoTimeMs && totalBytes >= entry.prevIoBytes) {
+            double dt = static_cast<double>(nowMs - entry.prevIoTimeMs) / 1000.0;
+            if (dt > 0.01) {
+              entry.ioBps = static_cast<double>(totalBytes - entry.prevIoBytes) / dt;
+            }
+          }
+          entry.prevIoBytes = totalBytes;
+          entry.prevIoTimeMs = nowMs;
+        }
+      }
+      CloseHandle(hProc);
     }
-    CloseHandle(hProc);
   }
 
-  if (name.empty()) {
+  if (entry.name.empty()) {
     auto snapIt = snapshotMap.find(pid);
-    if (snapIt != snapshotMap.end()) {
-      name = snapIt->second;
-    } else {
-      name = "PID " + std::to_string(pid);
-    }
+    entry.name = (snapIt != snapshotMap.end()) ? snapIt->second : ("PID " + std::to_string(pid));
+    entry.lastCheckedMs = nowMs;
   }
 
-  procCache_[pid] = ProcCacheEntry{name, path, nowMs};
-  outName = std::move(name);
-  outPath = std::move(path);
+  outName = entry.name;
+  outPath = entry.path;
+  outIoBps = entry.ioBps;
 }
 
 TelemetrySnapshot NetMonitor::poll(uint64_t nowMs) {
@@ -430,12 +532,11 @@ TelemetrySnapshot NetMonitor::poll(uint64_t nowMs) {
   raw.reserve(256);
   uint32_t listeningCount = 0;
 
-  pollTcp4(raw, listeningCount);
-  pollTcp6(raw, listeningCount);
+  pollTcp4(raw, listeningCount, nowMs);
+  pollTcp6(raw, listeningCount, nowMs);
   pollUdp4(raw, listeningCount);
   pollUdp6(raw, listeningCount);
 
-  // Lazy snapshot only if we have PIDs missing from cache or expired.
   bool needSnap = false;
   for (const auto& s : raw) {
     if (s.pid <= 4) continue;
@@ -456,15 +557,21 @@ TelemetrySnapshot NetMonitor::poll(uint64_t nowMs) {
   TelemetrySnapshot snap;
   snap.timestampMs = nowMs;
   snap.listeningSockets = listeningCount;
+  snap.isElevated = elevated_;
+  snap.bandwidthMode = elevated_ ? "exact_estats" : "process_io";
   snap.nic = pollNicThroughput(nowMs);
 
+  std::unordered_map<uint32_t, ProcessBandwidth> procAgg;
+
   for (auto& s : raw) {
-    resolveProcessInfo(s.pid, nowMs, snapMap, s.processName, s.processPath);
+    const uint64_t estatsIn = s.firstSeenMs;
+    const uint64_t estatsOut = s.lastSeenMs;
+    double ioBps = 0.0;
+    resolveProcessInfo(s.pid, nowMs, snapMap, s.processName, s.processPath, ioBps);
 
     auto prevIt = activeTracked_.find(s.key);
     if (prevIt != activeTracked_.end()) {
       s.firstSeenMs = prevIt->second.entry.firstSeenMs;
-      // Stay "new" for 1200ms so UI catches the arrival pulse cleanly.
       s.lifecycle = (nowMs - s.firstSeenMs < 1200) ? Lifecycle::New : Lifecycle::Active;
     } else {
       s.firstSeenMs = nowMs;
@@ -478,11 +585,43 @@ TelemetrySnapshot NetMonitor::poll(uint64_t nowMs) {
       ++snap.lanConnections;
     }
 
-    nextActive[s.key] = TrackedSocket{s, 0};
+    auto& pb = procAgg[s.pid];
+    pb.pid = s.pid;
+    pb.processName = s.processName;
+    pb.processPath = s.processPath;
+    ++pb.connections;
+    if (s.scope == IpScope::Public) ++pb.publicConnections;
+    pb.rxBps += s.rxBps;
+    pb.txBps += s.txBps;
+    if (elevated_) {
+      pb.activityBps += (s.rxBps + s.txBps);
+    } else {
+      pb.activityBps = ioBps;
+    }
+
+    TrackedSocket ts;
+    ts.entry = s;
+    if (elevated_ && s.state == "ESTABLISHED") {
+      ts.estatsEnabled = true;
+      ts.prevBytesIn = estatsIn;
+      ts.prevBytesOut = estatsOut;
+      ts.prevStatsMs = nowMs;
+    }
+    nextActive[s.key] = std::move(ts);
     snap.connections.push_back(std::move(s));
   }
 
-  // Move disappeared sockets into recentlyClosed_ for 1200ms so UI renders closing animation.
+  snap.processStats.reserve(procAgg.size());
+  for (auto& [pid, pb] : procAgg) {
+    (void)pid;
+    snap.processStats.push_back(std::move(pb));
+  }
+  std::sort(snap.processStats.begin(), snap.processStats.end(),
+            [](const ProcessBandwidth& a, const ProcessBandwidth& b) {
+              if (a.activityBps != b.activityBps) return a.activityBps > b.activityBps;
+              return a.connections > b.connections;
+            });
+
   for (auto& [key, tracked] : activeTracked_) {
     if (nextActive.find(key) == nextActive.end()) {
       tracked.entry.lifecycle = Lifecycle::Closed;

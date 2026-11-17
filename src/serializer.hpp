@@ -29,6 +29,14 @@ inline std::string serializeSnapshotJson(const TelemetrySnapshot& snap,
   out += std::to_string(snap.pollLatencyUs);
   out += ",\"intervalMs\":";
   out += std::to_string(intervalMs);
+  out += ",\"elevated\":";
+  out += (snap.isElevated ? "true" : "false");
+  out += ",\"bwMode\":";
+  appendJsonEscaped(out, snap.bandwidthMode);
+  out += ",\"mmdb\":";
+  out += (geoDns.hasOfflineMmdb() ? "true" : "false");
+  out += ",\"mmdbName\":";
+  appendJsonEscaped(out, geoDns.offlineMmdbName());
 
   out += ",\"stats\":{\"total\":";
   out += std::to_string(snap.totalConnections);
@@ -168,9 +176,44 @@ inline std::string serializeSnapshotJson(const TelemetrySnapshot& snap,
     out += "\",\"ageMs\":";
     uint64_t age = (c.lastSeenMs >= c.firstSeenMs) ? (c.lastSeenMs - c.firstSeenMs) : 0;
     out += std::to_string(age);
+    std::snprintf(numBuf, sizeof(numBuf), "%.1f", c.rxBps);
+    out += ",\"rxBps\":";
+    out += numBuf;
+    std::snprintf(numBuf, sizeof(numBuf), "%.1f", c.txBps);
+    out += ",\"txBps\":";
+    out += numBuf;
     out.push_back('}');
   }
   out.push_back(']');
+
+  out += ",\"procs\":[";
+  const size_t procCount = std::min<size_t>(snap.processStats.size(), 40);
+  for (size_t i = 0; i < procCount; ++i) {
+    const auto& p = snap.processStats[i];
+    if (i > 0) out.push_back(',');
+    out += "{\"pid\":";
+    out += std::to_string(p.pid);
+    out += ",\"proc\":";
+    appendJsonEscaped(out, p.processName);
+    out += ",\"path\":";
+    appendJsonEscaped(out, p.processPath);
+    out += ",\"conns\":";
+    out += std::to_string(p.connections);
+    out += ",\"pub\":";
+    out += std::to_string(p.publicConnections);
+    std::snprintf(numBuf, sizeof(numBuf), "%.1f", p.rxBps);
+    out += ",\"rxBps\":";
+    out += numBuf;
+    std::snprintf(numBuf, sizeof(numBuf), "%.1f", p.txBps);
+    out += ",\"txBps\":";
+    out += numBuf;
+    std::snprintf(numBuf, sizeof(numBuf), "%.1f", p.activityBps);
+    out += ",\"actBps\":";
+    out += numBuf;
+    out.push_back('}');
+  }
+  out.push_back(']');
+
   if (serviceMon) {
     out += ",\"services\":";
     out += serviceMon->getServicesJson();

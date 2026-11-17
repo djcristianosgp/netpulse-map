@@ -10,7 +10,9 @@
 
 #include "tray_host.hpp"
 
+#include <algorithm>
 #include <atomic>
+#include <mutex>
 
 namespace netpulse {
 
@@ -21,6 +23,26 @@ constexpr wchar_t kMutexName[] = L"NetPulse2D_SingleInstance_Mutex";
 
 constexpr UINT WM_TRAY_CALLBACK = WM_APP + 1;
 constexpr UINT WM_OPEN_EXISTING = WM_APP + 2;
+constexpr UINT WM_SHOW_BALLOON = WM_APP + 3;
+
+struct PendingBalloon {
+  std::wstring title;
+  std::wstring body;
+  bool isWarning = false;
+};
+
+std::mutex gBalloonMutex;
+PendingBalloon gPendingBalloon;
+
+std::wstring utf8ToWideTruncated(const std::string& s, size_t maxChars) {
+  if (s.empty()) return {};
+  int needed = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+  if (needed <= 0) return {};
+  std::wstring out(static_cast<size_t>(needed), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), out.data(), needed);
+  if (out.size() > maxChars) out.resize(maxChars);
+  return out;
+}
 
 constexpr UINT ID_MENU_OPEN_APP = 1001;
 constexpr UINT ID_MENU_OPEN_BROWSER = 1002;
@@ -105,6 +127,18 @@ LRESULT CALLBACK trayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
       if (st && st->callbacks.onOpenApp) st->callbacks.onOpenApp();
       return 0;
 
+    case WM_SHOW_BALLOON:
+      if (st && st->iconAdded) {
+        std::lock_guard lock(gBalloonMutex);
+        NOTIFYICONDATAW info = st->nid;
+        info.uFlags = NIF_INFO;
+        info.dwInfoFlags = gPendingBalloon.isWarning ? NIIF_WARNING : NIIF_INFO;
+        wcsncpy_s(info.szInfoTitle, gPendingBalloon.title.c_str(), _TRUNCATE);
+        wcsncpy_s(info.szInfo, gPendingBalloon.body.c_str(), _TRUNCATE);
+        Shell_NotifyIconW(NIM_MODIFY, &info);
+      }
+      return 0;
+
     case WM_CLOSE:
       if (st && st->runningFlag) st->runningFlag->store(false);
       DestroyWindow(hwnd);
@@ -151,6 +185,18 @@ void requestTrayQuit() {
   if (hwnd) {
     PostMessageW(hwnd, WM_CLOSE, 0, 0);
   }
+}
+
+void showTrayBalloon(const std::string& title, const std::string& body, bool isWarning) {
+  HWND hwnd = gTrayHwnd.load();
+  if (!hwnd) return;
+  {
+    std::lock_guard lock(gBalloonMutex);
+    gPendingBalloon.title = utf8ToWideTruncated(title, 60);
+    gPendingBalloon.body = utf8ToWideTruncated(body, 240);
+    gPendingBalloon.isWarning = isWarning;
+  }
+  PostMessageW(hwnd, WM_SHOW_BALLOON, 0, 0);
 }
 
 void runTrayMessageLoop(const std::string& /*url*/,

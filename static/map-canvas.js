@@ -88,6 +88,7 @@ export class PlanetMapCanvas {
     this.lanNodes = [];
     this.services = [];
     this.backboneArcs = [];
+    this.traceRoute = null; // { targetIp, hops: [{ttl, ip, rttMs, lat, lon, label}], segments: [...] }
     this.continentTraffic = new Map();
     this.countryCounts = new Map(); // countryCode / countryName -> count
     this.host = { lat: -23.55, lon: -46.63, city: 'Local Host', country: 'Local', resolved: false };
@@ -228,6 +229,7 @@ export class PlanetMapCanvas {
             asn: g.asn || '',
             conns: [],
             processes: new Set(),
+            totalBps: 0,
             hasNew: false,
             hasEstablished: false,
             allClosed: true,
@@ -238,6 +240,7 @@ export class PlanetMapCanvas {
         }
         node.conns.push(c);
         node.processes.add(c.proc);
+        node.totalBps += (c.rxBps || 0) + (c.txBps || 0);
         if (c.life === 'new') node.hasNew = true;
         if (c.state === 'ESTABLISHED') node.hasEstablished = true;
         if (c.life !== 'closed') node.allClosed = false;
@@ -325,6 +328,29 @@ export class PlanetMapCanvas {
     this.viewMode = mode;
     this.hoveredNode = null;
     this.hoveredService = null;
+  }
+
+  setTraceRoute(targetIp, geoHops) {
+    if (!geoHops || geoHops.length === 0) {
+      this.traceRoute = null;
+      return;
+    }
+    const chain = [{ lat: this.host.lat, lon: this.host.lon, ttl: 0, label: 'Você', rttMs: 0 }];
+    for (const h of geoHops) {
+      chain.push(h);
+    }
+    const segs = [];
+    for (let i = 0; i + 1 < chain.length; i++) {
+      const a = chain[i];
+      const b = chain[i + 1];
+      if (Math.hypot(a.lat - b.lat, a.lon - b.lon) < 0.05) continue;
+      segs.push(...buildGreatCircleSegments(a.lon, a.lat, b.lon, b.lat, 28));
+    }
+    this.traceRoute = { targetIp, hops: geoHops, segments: segs };
+  }
+
+  clearTraceRoute() {
+    this.traceRoute = null;
   }
 
   resize() {
@@ -614,6 +640,77 @@ export class PlanetMapCanvas {
       this.renderLocalLayer(ctx, timeSec);
     }
 
+    this.renderTraceOverlay(ctx, timeSec);
+
+    ctx.restore();
+  }
+
+  renderTraceOverlay(ctx, timeSec) {
+    if (!this.traceRoute || !this.traceRoute.hops || this.traceRoute.hops.length === 0) return;
+
+    ctx.save();
+    // Draw golden hop-by-hop geodesic route
+    ctx.lineWidth = 2.6;
+    ctx.strokeStyle = '#fbbf24';
+    ctx.shadowColor = '#f59e0b';
+    ctx.shadowBlur = 10;
+    ctx.setLineDash([6, 4]);
+    ctx.lineDashOffset = -timeSec * 28;
+
+    const allPts = [];
+    for (const seg of this.traceRoute.segments) {
+      if (seg.length < 2) continue;
+      ctx.beginPath();
+      for (let i = 0; i < seg.length; i++) {
+        const [sx, sy] = this.projectToScreen(seg[i][0], seg[i][1]);
+        allPts.push([sx, sy]);
+        if (i === 0) ctx.moveTo(sx, sy);
+        else ctx.lineTo(sx, sy);
+      }
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.shadowBlur = 0;
+
+    // Animated packet along trace chain
+    if (allPts.length >= 2) {
+      const idx = Math.min(allPts.length - 1, Math.floor(((timeSec * 0.45) % 1) * (allPts.length - 1)));
+      const [px, py] = allPts[idx];
+      ctx.beginPath();
+      ctx.arc(px, py, 4, 0, Math.PI * 2);
+      ctx.fillStyle = '#fef3c7';
+      ctx.fill();
+    }
+
+    // Draw numbered hop waypoints
+    for (const h of this.traceRoute.hops) {
+      const [hx, hy] = this.projectToScreen(h.lon, h.lat);
+      ctx.beginPath();
+      ctx.arc(hx, hy, 8, 0, Math.PI * 2);
+      ctx.fillStyle = '#f59e0b';
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = '#030712';
+      ctx.stroke();
+
+      ctx.font = '700 9px "JetBrains Mono", Consolas, monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#030712';
+      ctx.fillText(String(h.ttl), hx, hy + 0.5);
+
+      const lbl = `#${h.ttl} ${h.label} (${Math.round(h.rttMs)}ms)`;
+      ctx.font = '600 10.5px Inter, system-ui, sans-serif';
+      ctx.textAlign = 'left';
+      const tw = ctx.measureText(lbl).width + 10;
+      ctx.fillStyle = 'rgba(2, 6, 23, 0.88)';
+      ctx.fillRect(hx + 11, hy - 9, tw, 18);
+      ctx.strokeStyle = 'rgba(251, 191, 36, 0.65)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(hx + 11, hy - 9, tw, 18);
+      ctx.fillStyle = '#fef3c7';
+      ctx.fillText(lbl, hx + 16, hy);
+    }
     ctx.restore();
   }
 
@@ -794,7 +891,8 @@ export class PlanetMapCanvas {
           (this.hoveredNode && this.hoveredNode.key === node.key) ||
           this.selectedNodeKey === node.key;
         const baseColor = isHot ? '#ffffff' : node.color;
-        const lineW = isHot ? 2.4 : Math.min(2.6, 0.9 + Math.log2(node.conns.length + 1) * 0.45);
+        const bwBoost = node.totalBps > 0 ? Math.min(2.0, Math.log10(node.totalBps + 1) * 0.32) : 0;
+        const lineW = isHot ? 2.6 : Math.min(3.4, 0.9 + Math.log2(node.conns.length + 1) * 0.42 + bwBoost);
 
         ctx.save();
         ctx.lineWidth = lineW;

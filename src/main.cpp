@@ -9,10 +9,13 @@
 #include <windows.h>
 #include <shellapi.h>
 
+#include "actions.hpp"
 #include "geo_dns.hpp"
+#include "history_store.hpp"
 #include "net_monitor.hpp"
 #include "serializer.hpp"
 #include "service_monitor.hpp"
+#include "traceroute.hpp"
 #include "tray_host.hpp"
 #include "updater.hpp"
 #include "version.hpp"
@@ -147,6 +150,7 @@ int main(int argc, char** argv) {
   std::atomic<uint32_t> intervalMs{1000};
   bool openBrowser = true;
   bool useAppMode = true;
+  bool waitSlot = false;
 
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
@@ -158,6 +162,8 @@ int main(int argc, char** argv) {
       openBrowser = false;
     } else if (arg == "--browser-tab") {
       useAppMode = false;
+    } else if (arg == "--wait-slot") {
+      waitSlot = true;
     }
   }
 
@@ -166,9 +172,19 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  const bool trayMode = (openBrowser || waitSlot) && (port == 8740);
   void* instanceMutex = nullptr;
-  if (openBrowser && port == 8740) {
-    if (!netpulse::acquireSingleInstanceOrFocusExisting(&instanceMutex)) {
+  if (trayMode) {
+    int attempts = waitSlot ? 25 : 1;
+    bool acquired = false;
+    for (int i = 0; i < attempts; ++i) {
+      if (netpulse::acquireSingleInstanceOrFocusExisting(&instanceMutex)) {
+        acquired = true;
+        break;
+      }
+      if (i + 1 < attempts) std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    }
+    if (!acquired) {
       WSACleanup();
       return 0;
     }
@@ -182,10 +198,18 @@ int main(int argc, char** argv) {
   const std::filesystem::path dataDir = resolveDataDir(rootDir);
 
   netpulse::GeoDnsService geoDns(dataDir / "geoip_cache.tsv");
+  geoDns.tryLoadMmdbFromDir(dataDir);
+  geoDns.tryLoadMmdbFromDir(assetsDir);
   geoDns.start();
 
   netpulse::ServiceMonitor serviceMon(dataDir / "custom_services.tsv");
   serviceMon.start();
+
+  netpulse::TracerouteService tracer(geoDns);
+  netpulse::HistoryStore history(dataDir);
+  history.setAlertCallback([](const std::string& title, const std::string& body, bool isWarning) {
+    netpulse::showTrayBalloon(title, body, isWarning);
+  });
 
   netpulse::UpdateManager updater(netpulse::kAppVersion, []() {
     gRunning.store(false);
@@ -202,8 +226,10 @@ int main(int argc, char** argv) {
   server.setHealthCallback([&]() {
     uint64_t uptime = nowMs() - startMs;
     return std::string("{\"status\":\"ok\",\"version\":\"") + netpulse::kAppVersion +
-           "\",\"engine\":\"C++20 Native Win32\",\"uptimeMs\":" +
-           std::to_string(uptime) +
+           "\",\"engine\":\"C++20 Native Win32\",\"elevated\":" +
+           (netpulse::isProcessElevated() ? "true" : "false") +
+           ",\"mmdb\":" + (geoDns.hasOfflineMmdb() ? "true" : "false") +
+           ",\"uptimeMs\":" + std::to_string(uptime) +
            ",\"pollUs\":" + std::to_string(lastPollUs.load()) +
            ",\"geoCached\":" + std::to_string(geoDns.cachedGeoCount()) +
            ",\"dnsCached\":" + std::to_string(geoDns.cachedDnsCount()) +
@@ -251,6 +277,68 @@ int main(int argc, char** argv) {
       }
       return {200, serviceMon.getServicesJson()};
     }
+    if (path == "/api/trace/start" && method == "POST") {
+      std::string ip = extractSimpleJsonField(body, "ip");
+      if (!tracer.startTrace(ip)) {
+        return {400, "{\"error\":\"invalid_ip\"}"};
+      }
+      return {202, tracer.getStatusJson()};
+    }
+    if (path == "/api/trace/status" && method == "GET") {
+      return {200, tracer.getStatusJson()};
+    }
+    if (path == "/api/history/events" && method == "GET") {
+      return {200, history.getEventsJson(150)};
+    }
+    if (path == "/api/history/service" && method == "POST") {
+      std::string id = extractSimpleJsonField(body, "id");
+      return {200, history.getServiceHistoryJson(id, 60)};
+    }
+    if (path == "/api/alerts/toggle" && method == "POST") {
+      std::string en = extractSimpleJsonField(body, "enabled");
+      bool next = (en == "true" || en == "1");
+      history.setAlertsEnabled(next);
+      return {200, std::string("{\"alertsEnabled\":") + (next ? "true" : "false") + "}"};
+    }
+    if (path == "/api/action/kill-process" && method == "POST") {
+      uint32_t pid = static_cast<uint32_t>(std::strtoul(extractSimpleJsonField(body, "pid").c_str(), nullptr, 10));
+      std::string proc = extractSimpleJsonField(body, "proc");
+      std::string err;
+      if (!netpulse::terminateTargetProcess(pid, proc, err)) {
+        std::string resp = "{\"ok\":false,\"error\":";
+        netpulse::appendJsonEscaped(resp, err);
+        resp.push_back('}');
+        return {400, resp};
+      }
+      history.recordManualAction("warn", "Processo encerrado", proc + " (PID " + std::to_string(pid) + ")");
+      return {200, "{\"ok\":true}"};
+    }
+    if (path == "/api/action/block-ip" && method == "POST") {
+      std::string ip = extractSimpleJsonField(body, "ip");
+      std::string err;
+      if (!netpulse::blockIpInWindowsFirewall(ip, netpulse::isProcessElevated(), err)) {
+        std::string resp = "{\"ok\":false,\"error\":";
+        netpulse::appendJsonEscaped(resp, err);
+        resp.push_back('}');
+        return {400, resp};
+      }
+      history.recordManualAction("warn", "IP bloqueado no Firewall", ip);
+      return {200, "{\"ok\":true}"};
+    }
+    if (path == "/api/elevate" && method == "POST") {
+      if (netpulse::isProcessElevated()) {
+        return {200, "{\"ok\":true,\"alreadyElevated\":true}"};
+      }
+      if (!netpulse::relaunchAsAdministrator()) {
+        return {400, "{\"ok\":false,\"error\":\"Elevacao UAC cancelada\"}"};
+      }
+      std::thread([]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        gRunning.store(false);
+        netpulse::requestTrayQuit();
+      }).detach();
+      return {202, "{\"ok\":true,\"restarting\":true}"};
+    }
     return {404, "{\"error\":\"not_found\"}"};
   });
 
@@ -278,6 +366,7 @@ int main(int argc, char** argv) {
   }
 
   if (!server.start()) {
+    tracer.stop();
     serviceMon.stop();
     updater.stop();
     geoDns.stop();
@@ -311,6 +400,9 @@ int main(int argc, char** argv) {
         geoDns.enqueueLookups(pubs);
       }
 
+      history.processTelemetry(snap, geoDns);
+      history.processServices(serviceMon.getSnapshot());
+
       const size_t clients = server.clientCount();
       if (clients > 0 || (tickStart - lastIdleSerializeMs) >= 1500) {
         std::string json =
@@ -330,7 +422,7 @@ int main(int argc, char** argv) {
     }
   });
 
-  if (openBrowser) {
+  if (trayMode) {
     netpulse::TrayCallbacks cb;
     cb.onOpenApp = [url, useAppMode]() { launchAppWindow(url, useAppMode); };
     cb.onOpenBrowser = [url]() { launchAppWindow(url, false); };
@@ -346,6 +438,7 @@ int main(int argc, char** argv) {
   gRunning.store(false);
   pollThread.request_stop();
   pollThread.join();
+  tracer.stop();
   serviceMon.stop();
   updater.stop();
   server.stop();

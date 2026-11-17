@@ -64,6 +64,19 @@ struct SocketEntry {
   Lifecycle lifecycle = Lifecycle::Active;
   uint64_t firstSeenMs = 0;
   uint64_t lastSeenMs = 0;
+  double rxBps = 0.0;
+  double txBps = 0.0;
+};
+
+struct ProcessBandwidth {
+  uint32_t pid = 0;
+  std::string processName;
+  std::string processPath;
+  uint32_t connections = 0;
+  uint32_t publicConnections = 0;
+  double rxBps = 0.0;
+  double txBps = 0.0;
+  double activityBps = 0.0;
 };
 
 struct NicThroughput {
@@ -81,9 +94,12 @@ struct TelemetrySnapshot {
   uint32_t publicConnections = 0;
   uint32_t lanConnections = 0;
   uint32_t listeningSockets = 0;
+  bool isElevated = false;
+  std::string bandwidthMode = "process_io";
   NicThroughput nic;
   HostGeo hostGeo;
   std::vector<SocketEntry> connections;
+  std::vector<ProcessBandwidth> processStats;
 };
 
 inline const char* scopeToString(IpScope s) {

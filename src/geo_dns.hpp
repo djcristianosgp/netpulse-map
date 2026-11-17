@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mmdb_reader.hpp"
 #include "models.hpp"
 
 #include <atomic>
@@ -44,6 +45,10 @@ public:
 
   size_t cachedGeoCount() const;
   size_t cachedDnsCount() const;
+  bool hasOfflineMmdb() const { return cityMmdb_.isLoaded(); }
+  std::string offlineMmdbName() const;
+
+  void tryLoadMmdbFromDir(const std::filesystem::path& dir);
 
   // Exposed for unit testing TSV persistence.
   void loadCache();
@@ -56,6 +61,9 @@ private:
   void fetchGeoBatch(const std::vector<std::string>& ips);
 
   std::filesystem::path cachePath_;
+  MmdbReader cityMmdb_;
+  MmdbReader asnMmdb_;
+  std::string mmdbName_;
 
   mutable std::shared_mutex geoMutex_;
   std::unordered_map<std::string, GeoInfo> geoCache_;

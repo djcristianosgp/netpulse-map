@@ -307,6 +307,33 @@ GeoDnsService::~GeoDnsService() {
   stop();
 }
 
+void GeoDnsService::tryLoadMmdbFromDir(const std::filesystem::path& dir) {
+  std::error_code ec;
+  if (!std::filesystem::exists(dir, ec) || !std::filesystem::is_directory(dir, ec)) return;
+
+  for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+    if (!entry.is_regular_file()) continue;
+    auto ext = entry.path().extension().string();
+    for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (ext != ".mmdb") continue;
+
+    MmdbReader probe;
+    if (!probe.load(entry.path())) continue;
+
+    const std::string& dbType = probe.databaseType();
+    if (dbType.find("ASN") != std::string::npos) {
+      if (!asnMmdb_.isLoaded()) asnMmdb_ = std::move(probe);
+    } else if (!cityMmdb_.isLoaded()) {
+      cityMmdb_ = std::move(probe);
+      mmdbName_ = entry.path().filename().string();
+    }
+  }
+}
+
+std::string GeoDnsService::offlineMmdbName() const {
+  return mmdbName_;
+}
+
 void GeoDnsService::loadCache() {
   std::error_code ec;
   if (!std::filesystem::exists(cachePath_, ec)) return;
@@ -395,6 +422,24 @@ void GeoDnsService::enqueueLookups(const std::vector<std::string>& publicIps) {
   const uint64_t now = nowEpochMs();
   std::vector<std::string> needGeo;
   std::vector<std::string> needDns;
+
+  if (cityMmdb_.isLoaded()) {
+    std::unique_lock gLock(geoMutex_);
+    for (const auto& ip : publicIps) {
+      if (geoCache_.find(ip) != geoCache_.end()) continue;
+      auto mmdbRes = cityMmdb_.lookup(ip);
+      if (mmdbRes.has_value()) {
+        if (asnMmdb_.isLoaded()) {
+          if (auto asnRes = asnMmdb_.lookup(ip); asnRes.has_value()) {
+            mmdbRes->asn = asnRes->asn;
+            if (mmdbRes->org.empty()) mmdbRes->org = asnRes->org;
+            if (mmdbRes->isp.empty()) mmdbRes->isp = asnRes->isp;
+          }
+        }
+        geoCache_[ip] = std::move(*mmdbRes);
+      }
+    }
+  }
 
   {
     std::shared_lock gLock(geoMutex_);

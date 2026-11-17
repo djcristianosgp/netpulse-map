@@ -9,7 +9,10 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 
+#include "../src/actions.hpp"
 #include "../src/geo_dns.hpp"
+#include "../src/history_store.hpp"
+#include "../src/mmdb_reader.hpp"
 #include "../src/net_monitor.hpp"
 #include "../src/serializer.hpp"
 #include "../src/service_monitor.hpp"
@@ -271,6 +274,107 @@ int testServiceMonitorParsing() {
   return 0;
 }
 
+int testMmdbAndHistorySecurity() {
+  // Build a minimal valid MaxMind DB (.mmdb) v2.0 file (IPv4, 24-bit record, 1 node: 0.0.0.0/1 -> record 16)
+  auto encStr = [](std::vector<uint8_t>& buf, const std::string& s) {
+    buf.push_back(static_cast<uint8_t>((2 << 5) | s.size()));
+    buf.insert(buf.end(), s.begin(), s.end());
+  };
+  auto encUint = [](std::vector<uint8_t>& buf, uint32_t v) {
+    if (v <= 0xFF) {
+      buf.push_back((5 << 5) | 1);
+      buf.push_back(static_cast<uint8_t>(v));
+    } else {
+      buf.push_back((5 << 5) | 2);
+      buf.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+      buf.push_back(static_cast<uint8_t>(v & 0xFF));
+    }
+  };
+  auto encDouble = [](std::vector<uint8_t>& buf, double d) {
+    buf.push_back((3 << 5) | 8);
+    uint64_t raw = 0;
+    std::memcpy(&raw, &d, sizeof(d));
+    for (int sh = 56; sh >= 0; sh -= 8) buf.push_back(static_cast<uint8_t>((raw >> sh) & 0xFF));
+  };
+
+  // Search tree: 1 node (6 bytes for 24-bit left/right records).
+  // Bit 0 = 0 (IPs 0.0.0.0..127.255.255.255) -> value node_count + 16 = 17 -> offset 0 in data section!
+  // Bit 1 = 1 -> node_count = 1 (not found)
+  std::vector<uint8_t> mmdb;
+  // Left record = 17 (0x000011), Right record = 1 (0x000001)
+  mmdb.insert(mmdb.end(), {0x00, 0x00, 0x11, 0x00, 0x00, 0x01});
+  // 16-byte separator
+  mmdb.insert(mmdb.end(), 16, 0x00);
+
+  // Data section at offset 0: Map{ "country": Map{"iso_code":"US"}, "location": Map{"latitude":39.03,"longitude":-77.5} }
+  mmdb.push_back((7 << 5) | 2);
+  encStr(mmdb, "country");
+  mmdb.push_back((7 << 5) | 1);
+  encStr(mmdb, "iso_code");
+  encStr(mmdb, "US");
+  encStr(mmdb, "location");
+  mmdb.push_back((7 << 5) | 2);
+  encStr(mmdb, "latitude");
+  encDouble(mmdb, 39.03);
+  encStr(mmdb, "longitude");
+  encDouble(mmdb, -77.5);
+
+  // Metadata marker + Map{ "node_count":1, "record_size":24, "ip_version":4, "database_type":"GeoLite2-City" }
+  const uint8_t marker[] = {0xAB, 0xCD, 0xEF, 'M', 'a', 'x', 'M', 'i', 'n', 'd', '.', 'c', 'o', 'm'};
+  mmdb.insert(mmdb.end(), std::begin(marker), std::end(marker));
+  mmdb.push_back((7 << 5) | 4);
+  encStr(mmdb, "node_count"); encUint(mmdb, 1);
+  encStr(mmdb, "record_size"); encUint(mmdb, 24);
+  encStr(mmdb, "ip_version"); encUint(mmdb, 4);
+  encStr(mmdb, "database_type"); encStr(mmdb, "GeoLite2-City");
+
+  auto mmdbPath = std::filesystem::temp_directory_path() / "netpulse_test.mmdb";
+  {
+    std::ofstream out(mmdbPath, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(mmdb.data()), static_cast<std::streamsize>(mmdb.size()));
+  }
+
+  MmdbReader reader;
+  CHECK(reader.load(mmdbPath));
+  CHECK(reader.databaseType() == "GeoLite2-City");
+  auto g = reader.lookup("8.8.8.8");
+  CHECK(g.has_value());
+  CHECK(g->countryCode == "US");
+  CHECK(std::abs(g->lat - 39.03) < 1e-4);
+  CHECK(std::abs(g->lon - (-77.5)) < 1e-4);
+  CHECK(!reader.lookup("200.1.2.3").has_value());
+  std::error_code ec;
+  std::filesystem::remove(mmdbPath, ec);
+
+  // Security & History checks
+  CHECK(isSensitivePort(22));
+  CHECK(isSensitivePort(3389));
+  CHECK(!isSensitivePort(443));
+  CHECK(isValidIpAddress("8.8.8.8"));
+  CHECK(isValidIpAddress("2606:4700:4700::1111"));
+  CHECK(!isValidIpAddress("8.8.8.8 & calc.exe"));
+  CHECK(isProtectedSystemProcess(4, "System"));
+  CHECK(isProtectedSystemProcess(999, "lsass.exe"));
+  CHECK(!isProtectedSystemProcess(99999, "notepad.exe"));
+
+  auto histDir = std::filesystem::temp_directory_path() / "netpulse_hist_test";
+  std::filesystem::remove_all(histDir, ec);
+  {
+    HistoryStore hs(histDir);
+    hs.recordManualAction("warn", "Teste", "Detalhe");
+    std::string j = hs.getEventsJson(10);
+    CHECK(j.find("Teste") != std::string::npos);
+  }
+  {
+    HistoryStore hs2(histDir);
+    CHECK(hs2.getEventsJson(10).find("Teste") != std::string::npos);
+  }
+  std::filesystem::remove_all(histDir, ec);
+
+  std::cout << "[PASS] testMmdbAndHistorySecurity\n";
+  return 0;
+}
+
 int main() {
   WSADATA wsa{};
   if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
@@ -282,6 +386,7 @@ int main() {
   rc |= testLiveMonitorAndWsLoopback();
   rc |= testSemVerAndReleaseParsing();
   rc |= testServiceMonitorParsing();
+  rc |= testMmdbAndHistorySecurity();
 
   WSACleanup();
   if (rc == 0) {

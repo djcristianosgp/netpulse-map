@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NetPulse 2D — Mapa Planetário de Conexões em Tempo Real</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body class="left-open">
+  <canvas id="planetCanvas"></canvas>
+
+  <!-- Top Telemetry & Control Bar -->
+  <header class="hud-top glass">
+    <div class="brand">
+      <div class="brand-pulse" id="connDot"></div>
+      <div>
+        <div class="brand-title">NetPulse 2D <span class="badge-cpp">C++20</span></div>
+        <div class="brand-sub" id="engineStatus">Conectando ao motor nativo...</div>
+      </div>
+    </div>
+
+    <div class="throughput-box">
+      <div class="tp-metrics">
+        <div class="tp-row rx"><span>↓ RX</span><strong id="rxRate">0 B/s</strong></div>
+        <div class="tp-row tx"><span>↑ TX</span><strong id="txRate">0 B/s</strong></div>
+      </div>
+      <canvas id="sparklineCanvas" width="120" height="34" title="Tráfego em tempo real (RX ciano / TX verde)"></canvas>
+    </div>
+
+    <div class="kpi-strip">
+      <div class="kpi"><span class="kpi-lbl">Públicas</span><strong id="kpiPublic">0</strong></div>
+      <div class="kpi"><span class="kpi-lbl">LAN</span><strong id="kpiLan">0</strong></div>
+      <div class="kpi"><span class="kpi-lbl">Países</span><strong id="kpiCountries">0</strong></div>
+      <div class="kpi"><span class="kpi-lbl">Processos</span><strong id="kpiProcesses">0</strong></div>
+      <div class="kpi"><span class="kpi-lbl">Bind/UDP</span><strong id="kpiListening">0</strong></div>
+    </div>
+
+    <div class="hud-controls">
+      <select id="projectionSelect" class="ctrl-select" title="Projeção do Mapa 2D">
+        <option value="naturalEarth">Natural Earth</option>
+        <option value="equirectangular">Equirectangular</option>
+        <option value="mercator">Mercator</option>
+      </select>
+
+      <button class="ctrl-btn active" id="btnTerminator" title="Alternar sombra Dia/Noite">Dia/Noite</button>
+      <button class="ctrl-btn active" id="btnArcs" title="Alternar arcos geodésicos">Arcos</button>
+      <button class="ctrl-btn" id="btnLan" title="Exibir anel LAN/Local no mapa">LAN</button>
+      <button class="ctrl-btn active" id="btnLabels" title="Alternar rótulos no mapa">Rótulos</button>
+
+      <div class="divider-v"></div>
+
+      <select id="intervalSelect" class="ctrl-select" title="Frequência de leitura do kernel">
+        <option value="150">150 ms</option>
+        <option value="300" selected>300 ms</option>
+        <option value="600">600 ms</option>
+        <option value="1000">1.0 s</option>
+      </select>
+      <button class="ctrl-btn" id="btnPause" title="Pausar/Retomar stream (Espaço)">Pausar</button>
+      <button class="ctrl-btn" id="btnReset" title="Mostrar planeta inteiro (R)">Planeta</button>
+    </div>
+  </header>
+
+  <!-- Left Collapsible Panel -->
+  <aside class="panel-left glass" id="leftPanel">
+    <button class="panel-toggle-left glass" id="toggleLeftBtn" title="Recolher/Expandir painel">◀</button>
+
+    <div class="panel-header">
+      <div class="tab-bar">
+        <button class="tab-btn active" data-tab="conns">Conexões</button>
+        <button class="tab-btn" data-tab="procs">Processos</button>
+        <button class="tab-btn" data-tab="countries">Países</button>
+      </div>
+      <div class="search-wrap">
+        <input id="searchInput" type="search" placeholder="Buscar IP, domínio, app, país, porta... (F)" autocomplete="off" />
+      </div>
+      <div class="filter-chips">
+        <button class="chip active" data-filter="all">Todas</button>
+        <button class="chip" data-filter="public">Públicas</button>
+        <button class="chip" data-filter="lan">LAN</button>
+        <button class="chip" data-filter="established">Established</button>
+        <button class="chip" data-filter="new">Novas</button>
+      </div>
+      <div id="activeFiltersBanner" class="active-banner hidden"></div>
+    </div>
+
+    <div class="panel-body" id="panelList"></div>
+  </aside>
+
+  <!-- Right Floating Inspector -->
+  <aside class="panel-right glass hidden" id="inspectorPanel">
+    <div class="insp-head">
+      <div>
+        <div class="insp-eyebrow" id="inspEyebrow">NÓ REMOTO</div>
+        <h2 class="insp-title" id="inspTitle">—</h2>
+      </div>
+      <button class="close-btn" id="closeInspectorBtn" title="Fechar (Esc)">✕</button>
+    </div>
+    <div class="insp-body" id="inspBody"></div>
+  </aside>
+
+  <!-- Bottom-Left Coords, Zoom & Legend -->
+  <div class="hud-bottom-left">
+    <div class="coords-box glass">
+      <span id="cursorCoords">LAT 0.00° · LON 0.00°</span>
+      <span class="sep">|</span>
+      <span id="zoomLevel">100%</span>
+      <div class="zoom-btns">
+        <button id="btnZoomIn" title="Aproximar">+</button>
+        <button id="btnZoomOut" title="Afastar">−</button>
+        <button id="btnZoomFit" title="Planeta Completo (R)">⌖</button>
+      </div>
+    </div>
+    <div class="legend glass">
+      <span><i class="dot host"></i>Você</span>
+      <span><i class="dot estab"></i>Established</span>
+      <span><i class="dot new"></i>Nova</span>
+      <span><i class="dot syn"></i>SYN</span>
+      <span><i class="dot closed"></i>Fechando</span>
+      <span><i class="dot lan"></i>LAN</span>
+    </div>
+  </div>
+
+  <!-- Floating Map Tooltip -->
+  <div id="mapTooltip" class="map-tooltip glass hidden"></div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

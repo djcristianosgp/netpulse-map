@@ -1,0 +1,29 @@
+# Build & MSVC artifacts
+build/
+out/
+CMakeFiles/
+CMakeCache.txt
+*.obj
+*.o
+*.exe
+*.pdb
+*.ilk
+*.idb
+*.exp
+*.lib
+*.dll
+
+# Local runtime cache & logs
+data/*
+!data/.gitkeep
+*.log
+*.tmp
+
+# Visual Studio / IDEs / OS
+.vs/
+*.suo
+*.user
+*.sln.docstates
+.vscode/
+.DS_Store
+Thumbs.db

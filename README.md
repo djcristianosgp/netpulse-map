@@ -1,0 +1,43 @@
+# NetPulse 2D — Mapa Planetário de Conexões de Rede em Tempo Real
+
+Aplicação local de altíssimo desempenho com motor nativo em **C++20 (`/O2`)** integrado diretamente às APIs do Kernel do Windows (`iphlpapi.dll` / `WinHTTP` / `Winsock2`) e interface interativa acelerada por hardware em **HTML5 Canvas2D** exibindo **o planeta completo** em tempo real.
+
+## Por que C++20?
+- **Leitura direta de sockets do kernel (`GetExtendedTcpTable`, `GetExtendedUdpTable`, `GetIfTable2`)** em menos de `1 ms` por ciclo (sem spawn de `netstat` ou PowerShell).
+- **Zero garbage collector e consumo mínimo** (~4–8 MB RAM no daemon nativo).
+- **Thread pool assíncrono** para resolução GeoIP em lote (`ip-api.com/batch` com cache persistente em `data/geoip_cache.tsv`) e Reverse DNS (`getnameinfo`).
+- **Servidor HTTP + WebSocket RFC-6455 nativo em Winsock2** sem dependências externas ou `node_modules`.
+
+## Como Compilar e Executar
+
+### Executar (binário já compilado)
+```bat
+cd tools\netpulse-map
+build\netpulse.exe
+```
+Ou dê duplo clique em `run.bat` (abre automaticamente em janela dedicada `--app` sem barras de navegador).
+
+Opções de linha de comando:
+- `--port 8740`: define a porta local (padrão `8740`)
+- `--interval 300`: intervalo de leitura em milissegundos (`100` a `5000`)
+- `--no-browser`: inicia apenas o servidor sem abrir janela
+- `--browser-tab`: abre em aba normal do navegador padrão em vez de janela `--app`
+
+### Recompilar (MSVC C++20)
+```bat
+cd tools\netpulse-map
+build.bat
+```
+
+### Executar Testes Nativos C++
+```bat
+cd tools\netpulse-map
+build\test_core.exe
+```
+
+## Interações com o Mapa 2D
+- **Planeta Completo**: visualiza todos os continentes e 177 países (`assets/countries-110m.json` offline) em 3 projeções alternáveis (**Natural Earth**, **Equirectangular**, **Mercator**).
+- **Pan & Zoom**: arraste com o mouse para mover; role a roda do mouse para zoom centrado no cursor; duplo clique para aproximar; `R` ou botão **Planeta** para reajustar o planeta inteiro.
+- **Hover e Clique em Países**: passe o mouse sobre qualquer país para ver conexões ativas; clique para filtrar e inspecionar.
+- **Nós, Arcos Geodésicos e Pulsos**: clique em qualquer nó ou linha da lista para voar até a coordenada no mapa e inspecionar IP, domínio (PTR), ISP/ASN, processo, PID, portas e duração.
+- **Atalhos**: `Espaço` pausa/retoma o stream · `F` foca a busca · `R` reseta a visão do planeta · `Esc` limpa seleção.

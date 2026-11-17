@@ -1,0 +1,765 @@
+import { decodeTopoJson } from './topo.js';
+import { PlanetMapCanvas } from './map-canvas.js';
+
+const $ = (id) => document.getElementById(id);
+
+function escHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function formatBytesPerSec(bps) {
+  if (!bps || bps < 1) return '0 B/s';
+  const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+  let idx = 0;
+  let val = bps;
+  while (val >= 1024 && idx < units.length - 1) {
+    val /= 1024;
+    idx++;
+  }
+  return `${val >= 100 ? val.toFixed(0) : val.toFixed(1)} ${units[idx]}`;
+}
+
+function formatAge(ms) {
+  const sec = Math.floor((ms || 0) / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ${sec % 60}s`;
+  const hr = Math.floor(min / 60);
+  return `${hr}h ${min % 60}m`;
+}
+
+function stateBadgeClass(c) {
+  if (c.scope !== 'public') return 'lan';
+  if (c.life === 'closed') return 'closed';
+  if (c.life === 'new') return 'new';
+  if (c.state === 'SYN_SENT' || c.state === 'SYN_RCVD') return 'syn';
+  return '';
+}
+
+const state = {
+  paused: false,
+  snapshot: null,
+  tab: 'conns',       // 'conns' | 'procs' | 'countries'
+  filter: 'all',      // 'all' | 'public' | 'lan' | 'established' | 'new'
+  search: '',
+  selectedCountry: null,
+  selectedProcess: null,
+  selectedConnKey: null,
+  selectedNodeKey: null,
+  rxHistory: new Array(60).fill(0),
+  txHistory: new Array(60).fill(0),
+};
+
+let ws = null;
+let reconnectTimer = null;
+
+const mapCanvas = new PlanetMapCanvas($('planetCanvas'), {
+  onCursorCoords(ll) {
+    if (!ll) {
+      $('cursorCoords').textContent = 'FORA DO PLANETA';
+      return;
+    }
+    const [lon, lat] = ll;
+    const latStr = `${Math.abs(lat).toFixed(2)}°${lat >= 0 ? 'N' : 'S'}`;
+    const lonStr = `${Math.abs(lon).toFixed(2)}°${lon >= 0 ? 'E' : 'W'}`;
+    $('cursorCoords').textContent = `LAT ${latStr} · LON ${lonStr}`;
+  },
+  onZoomChange(zoom) {
+    $('zoomLevel').textContent = `${Math.round(zoom * 100)}%`;
+  },
+  onHover({ x, y, node, country, countryCount }) {
+    const tt = $('mapTooltip');
+    if (node) {
+      const procs = Array.from(node.processes).slice(0, 4).join(', ');
+      const place = [node.city, node.country].filter(Boolean).join(', ');
+      tt.innerHTML = `
+        <div class="tt-title">${escHtml(place || 'Local Desconhecido')} (${escHtml(node.cc)})</div>
+        <div class="tt-sub">${node.conns.length} conex${node.conns.length === 1 ? 'ão' : 'ões'} · ${escHtml(procs)}</div>
+        ${node.isp ? `<div class="tt-sub">${escHtml(node.isp)}</div>` : ''}
+      `;
+      positionTooltip(tt, x, y);
+      tt.classList.remove('hidden');
+      return;
+    }
+    if (country) {
+      tt.innerHTML = `
+        <div class="tt-title">${escHtml(country.name)}</div>
+        <div class="tt-sub">${countryCount > 0 ? `${countryCount} conexões ativas` : 'Sem conexões ativas'}</div>
+      `;
+      positionTooltip(tt, x, y);
+      tt.classList.remove('hidden');
+      return;
+    }
+    tt.classList.add('hidden');
+  },
+  onSelectNode(node) {
+    state.selectedNodeKey = node.key;
+    state.selectedConnKey = node.conns[0]?.k || null;
+    state.selectedCountry = null;
+    openNodeInspector(node);
+    renderPanel();
+  },
+  onSelectCountry(countryName) {
+    state.selectedCountry = countryName;
+    state.selectedNodeKey = null;
+    if (!countryName) {
+      closeInspector();
+    } else {
+      openCountryInspector(countryName);
+    }
+    applyAndRender();
+  },
+  onClearSelection() {
+    state.selectedNodeKey = null;
+    state.selectedConnKey = null;
+    state.selectedCountry = null;
+    closeInspector();
+    applyAndRender();
+  },
+});
+
+function positionTooltip(el, x, y) {
+  const pad = 14;
+  let left = x + pad;
+  let top = y + pad;
+  if (left + 290 > window.innerWidth) left = x - 290;
+  if (top + 90 > window.innerHeight) top = y - 90;
+  el.style.left = `${Math.max(8, left)}px`;
+  el.style.top = `${Math.max(8, top)}px`;
+}
+
+function drawSparkline() {
+  const c = $('sparklineCanvas');
+  const ctx = c.getContext('2d');
+  const w = c.width;
+  const h = c.height;
+  ctx.clearRect(0, 0, w, h);
+
+  let maxVal = 1024; // minimum 1 KB/s scale
+  for (let i = 0; i < 60; i++) {
+    if (state.rxHistory[i] > maxVal) maxVal = state.rxHistory[i];
+    if (state.txHistory[i] > maxVal) maxVal = state.txHistory[i];
+  }
+
+  const drawSeries = (arr, stroke, fill) => {
+    ctx.beginPath();
+    for (let i = 0; i < arr.length; i++) {
+      const x = (i / (arr.length - 1)) * w;
+      const y = h - 2 - (arr[i] / maxVal) * (h - 6);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.lineTo(w, h);
+    ctx.lineTo(0, h);
+    ctx.closePath();
+    ctx.fillStyle = fill;
+    ctx.fill();
+  };
+
+  drawSeries(state.rxHistory, '#22d3ee', 'rgba(34, 211, 238, 0.14)');
+  drawSeries(state.txHistory, '#10b981', 'rgba(16, 185, 129, 0.12)');
+}
+
+function getFilteredConnections() {
+  const snap = state.snapshot;
+  if (!snap) return [];
+
+  const q = state.search.trim().toLowerCase();
+  const geo = snap.geo || {};
+  const dns = snap.dns || {};
+
+  return snap.conns.filter((c) => {
+    if (state.filter === 'public' && c.scope !== 'public') return false;
+    if (state.filter === 'lan' && c.scope === 'public') return false;
+    if (state.filter === 'established' && c.state !== 'ESTABLISHED') return false;
+    if (state.filter === 'new' && c.life !== 'new') return false;
+
+    if (state.selectedProcess && c.proc !== state.selectedProcess) return false;
+
+    const g = geo[c.rip];
+    if (state.selectedCountry) {
+      if (!g || (g.country || '').toLowerCase() !== state.selectedCountry.toLowerCase()) {
+        return false;
+      }
+    }
+
+    if (q) {
+      const host = dns[c.rip] || '';
+      const hay = [
+        c.proc,
+        c.rip,
+        c.lip,
+        String(c.rport),
+        String(c.lport),
+        c.state,
+        host,
+        g?.country || '',
+        g?.cc || '',
+        g?.city || '',
+        g?.isp || '',
+        g?.asn || '',
+      ]
+        .join(' ')
+        .toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+}
+
+function updateKpisAndBanner(filteredConns) {
+  const snap = state.snapshot;
+  if (!snap) return;
+
+  const geo = snap.geo || {};
+  const countries = new Set();
+  const procs = new Set();
+  for (const c of snap.conns) {
+    procs.add(c.proc);
+    if (c.scope === 'public' && geo[c.rip]?.country) {
+      countries.add(geo[c.rip].country);
+    }
+  }
+
+  $('kpiPublic').textContent = snap.stats?.public ?? 0;
+  $('kpiLan').textContent = snap.stats?.lan ?? 0;
+  $('kpiCountries').textContent = countries.size;
+  $('kpiProcesses').textContent = procs.size;
+  $('kpiListening').textContent = snap.stats?.listening ?? 0;
+
+  $('rxRate').textContent = formatBytesPerSec(snap.nic?.rxBps || 0);
+  $('txRate').textContent = formatBytesPerSec(snap.nic?.txBps || 0);
+
+  const pollMs = ((snap.pollUs || 0) / 1000).toFixed(2);
+  if (!state.paused) {
+    $('engineStatus').textContent = `Ao vivo · ${pollMs} ms/poll · ${snap.stats?.geoCached || 0} GeoIP cache`;
+  }
+
+  const banner = $('activeFiltersBanner');
+  const activeTags = [];
+  if (state.selectedCountry) activeTags.push(`País: ${state.selectedCountry}`);
+  if (state.selectedProcess) activeTags.push(`App: ${state.selectedProcess}`);
+
+  if (activeTags.length > 0) {
+    banner.innerHTML = `<span>Filtro: <strong>${escHtml(activeTags.join(' · '))}</strong> (${filteredConns.length})</span><button id="clearActiveFiltersBtn">Limpar</button>`;
+    banner.classList.remove('hidden');
+    $('clearActiveFiltersBtn').onclick = () => {
+      state.selectedCountry = null;
+      state.selectedProcess = null;
+      mapCanvas.selectedCountryName = null;
+      applyAndRender();
+    };
+  } else {
+    banner.classList.add('hidden');
+  }
+}
+
+function renderPanel(filteredConns = getFilteredConnections()) {
+  const container = $('panelList');
+  const snap = state.snapshot;
+  if (!snap) {
+    container.innerHTML = '<div class="list-item"><div class="item-sub">Aguardando telemetria...</div></div>';
+    return;
+  }
+
+  const prevScroll = container.scrollTop;
+  const geo = snap.geo || {};
+  const dns = snap.dns || {};
+
+  if (state.tab === 'conns') {
+    const visible = filteredConns.slice(0, 250);
+    if (visible.length === 0) {
+      container.innerHTML = '<div class="list-item"><div class="item-sub">Nenhuma conexão corresponde aos filtros atuais.</div></div>';
+      return;
+    }
+
+    container.innerHTML = visible
+      .map((c) => {
+        const g = geo[c.rip];
+        const host = dns[c.rip];
+        const destLabel = host ? `${host} (${c.rip})` : c.rip;
+        const geoLabel =
+          c.scope === 'public'
+            ? g
+              ? `${g.city ? g.city + ', ' : ''}${g.country} · ${g.isp || g.org || ''}`
+              : 'Resolvendo GeoIP...'
+            : c.scope === 'loopback'
+            ? 'Loopback Local'
+            : 'Rede Local (LAN)';
+        const sel = state.selectedConnKey === c.k ? 'selected' : '';
+        return `
+          <div class="list-item ${sel}" data-conn-key="${escHtml(c.k)}">
+            <div class="item-top">
+              <span class="item-proc">${escHtml(c.proc)} <span style="color:var(--text-muted);font-weight:400">#${c.pid}</span></span>
+              <span class="state-pill ${stateBadgeClass(c)}">${escHtml(c.state)}</span>
+            </div>
+            <div class="item-sub">
+              <span class="mono-cut">${escHtml(destLabel)}:${c.rport}</span>
+              <span>:${c.lport} · ${formatAge(c.ageMs)}</span>
+            </div>
+            <div class="item-geo">${escHtml(geoLabel)}</div>
+          </div>
+        `;
+      })
+      .join('');
+
+    container.querySelectorAll('[data-conn-key]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const key = el.getAttribute('data-conn-key');
+        const conn = snap.conns.find((x) => x.k === key);
+        if (!conn) return;
+        state.selectedConnKey = key;
+        openConnectionInspector(conn);
+        const g = geo[conn.rip];
+        if (g) {
+          mapCanvas.selectedNodeKey = `${g.lat.toFixed(2)},${g.lon.toFixed(2)}`;
+          mapCanvas.flyTo(g.lon, g.lat, 2.5);
+        }
+        renderPanel(filteredConns);
+      });
+    });
+  } else if (state.tab === 'procs') {
+    const groups = new Map();
+    for (const c of filteredConns) {
+      let grp = groups.get(c.proc);
+      if (!grp) {
+        grp = { proc: c.proc, count: 0, publicCount: 0, countries: new Set(), pids: new Set() };
+        groups.set(c.proc, grp);
+      }
+      grp.count++;
+      grp.pids.add(c.pid);
+      if (c.scope === 'public') {
+        grp.publicCount++;
+        if (geo[c.rip]?.country) grp.countries.add(geo[c.rip].country);
+      }
+    }
+    const sorted = Array.from(groups.values()).sort((a, b) => b.count - a.count);
+    container.innerHTML = sorted
+      .map((g) => {
+        const sel = state.selectedProcess === g.proc ? 'selected' : '';
+        return `
+          <div class="list-item ${sel}" data-proc="${escHtml(g.proc)}">
+            <div class="item-top">
+              <span class="item-proc">${escHtml(g.proc)}</span>
+              <span class="state-pill">${g.count} conex.</span>
+            </div>
+            <div class="item-sub">
+              <span>${g.publicCount} públicas · ${g.countries.size} países</span>
+              <span>PID: ${Array.from(g.pids).slice(0, 3).join(', ')}</span>
+            </div>
+          </div>
+        `;
+      })
+      .join('');
+
+    container.querySelectorAll('[data-proc]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const proc = el.getAttribute('data-proc');
+        state.selectedProcess = state.selectedProcess === proc ? null : proc;
+        state.tab = 'conns';
+        syncTabButtons();
+        applyAndRender();
+      });
+    });
+  } else if (state.tab === 'countries') {
+    const groups = new Map();
+    for (const c of filteredConns) {
+      if (c.scope !== 'public') continue;
+      const g = geo[c.rip];
+      if (!g || !g.country) continue;
+      let grp = groups.get(g.country);
+      if (!grp) {
+        grp = { country: g.country, cc: g.cc, count: 0, ips: new Set(), lat: g.lat, lon: g.lon };
+        groups.set(g.country, grp);
+      }
+      grp.count++;
+      grp.ips.add(c.rip);
+    }
+    const sorted = Array.from(groups.values()).sort((a, b) => b.count - a.count);
+    container.innerHTML =
+      sorted.length === 0
+        ? '<div class="list-item"><div class="item-sub">Nenhum país resolvido ainda.</div></div>'
+        : sorted
+            .map((g) => {
+              const sel = state.selectedCountry === g.country ? 'selected' : '';
+              return `
+                <div class="list-item ${sel}" data-country="${escHtml(g.country)}" data-lat="${g.lat}" data-lon="${g.lon}">
+                  <div class="item-top">
+                    <span class="item-proc">${escHtml(g.country)} (${escHtml(g.cc)})</span>
+                    <span class="state-pill">${g.count}</span>
+                  </div>
+                  <div class="item-sub">
+                    <span>${g.ips.size} IPs únicos</span>
+                    <span>${g.lat.toFixed(1)}°, ${g.lon.toFixed(1)}°</span>
+                  </div>
+                </div>
+              `;
+            })
+            .join('');
+
+    container.querySelectorAll('[data-country]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const country = el.getAttribute('data-country');
+        const lat = parseFloat(el.getAttribute('data-lat'));
+        const lon = parseFloat(el.getAttribute('data-lon'));
+        state.selectedCountry = state.selectedCountry === country ? null : country;
+        mapCanvas.selectedCountryName = state.selectedCountry;
+        if (state.selectedCountry && !Number.isNaN(lat) && !Number.isNaN(lon)) {
+          mapCanvas.flyTo(lon, lat, 2.2);
+          openCountryInspector(country);
+        }
+        applyAndRender();
+      });
+    });
+  }
+
+  container.scrollTop = prevScroll;
+}
+
+function openConnectionInspector(c) {
+  const snap = state.snapshot;
+  const g = snap?.geo?.[c.rip];
+  const host = snap?.dns?.[c.rip];
+
+  document.body.classList.add('right-open');
+  $('inspectorPanel').classList.remove('hidden');
+  $('inspEyebrow').textContent = `${c.protocol} IPv${c.v} · ${c.state}`;
+  $('inspTitle').textContent = c.proc;
+
+  $('inspBody').innerHTML = `
+    <div class="kv-grid">
+      <div class="kv-k">Processo</div><div class="kv-v">${escHtml(c.proc)} (PID ${c.pid})</div>
+      <div class="kv-k">Executável</div><div class="kv-v">${escHtml(c.path || 'Sistema / Protegido')}</div>
+      <div class="kv-k">Local</div><div class="kv-v">${escHtml(c.lip)}:${c.lport}</div>
+      <div class="kv-k">Remoto</div><div class="kv-v">${escHtml(c.rip)}:${c.rport}</div>
+      <div class="kv-k">Hostname (PTR)</div><div class="kv-v">${escHtml(host || '—')}</div>
+      <div class="kv-k">Escopo</div><div class="kv-v">${escHtml(c.scope.toUpperCase())}</div>
+      <div class="kv-k">Duração</div><div class="kv-v">${formatAge(c.ageMs)}</div>
+    </div>
+    ${
+      g
+        ? `
+      <div class="insp-section-title">Geolocalização & Rede</div>
+      <div class="kv-grid">
+        <div class="kv-k">Localidade</div><div class="kv-v">${escHtml([g.city, g.region, g.country].filter(Boolean).join(', '))} (${escHtml(g.cc)})</div>
+        <div class="kv-k">Coordenadas</div><div class="kv-v">${g.lat.toFixed(4)}, ${g.lon.toFixed(4)}</div>
+        <div class="kv-k">ISP</div><div class="kv-v">${escHtml(g.isp || '—')}</div>
+        <div class="kv-k">Organização</div><div class="kv-v">${escHtml(g.org || '—')}</div>
+        <div class="kv-k">ASN</div><div class="kv-v">${escHtml(g.asn || '—')}</div>
+      </div>`
+        : ''
+    }
+  `;
+}
+
+function openNodeInspector(node) {
+  const snap = state.snapshot;
+  const dns = snap?.dns || {};
+
+  document.body.classList.add('right-open');
+  $('inspectorPanel').classList.remove('hidden');
+  $('inspEyebrow').textContent = `NÓ GEOGRÁFICO · ${node.conns.length} CONEXÕES`;
+  $('inspTitle').textContent = [node.city, node.country].filter(Boolean).join(', ') || node.country;
+
+  const connsHtml = node.conns
+    .slice(0, 40)
+    .map((c) => {
+      const host = dns[c.rip];
+      return `
+        <div class="list-item" data-insp-conn="${escHtml(c.k)}">
+          <div class="item-top">
+            <span class="item-proc">${escHtml(c.proc)} (#${c.pid})</span>
+            <span class="state-pill ${stateBadgeClass(c)}">${escHtml(c.state)}</span>
+          </div>
+          <div class="item-sub">
+            <span class="mono-cut">${escHtml(host ? `${host} · ${c.rip}` : c.rip)}:${c.rport}</span>
+            <span>:${c.lport}</span>
+          </div>
+        </div>
+      `;
+    })
+    .join('');
+
+  $('inspBody').innerHTML = `
+    <div class="kv-grid">
+      <div class="kv-k">País / Região</div><div class="kv-v">${escHtml([node.region, node.country].filter(Boolean).join(', '))} (${escHtml(node.cc)})</div>
+      <div class="kv-k">Coordenadas</div><div class="kv-v">${node.lat.toFixed(4)}, ${node.lon.toFixed(4)}</div>
+      <div class="kv-k">ISP / Org</div><div class="kv-v">${escHtml(node.isp || node.org || '—')}</div>
+      <div class="kv-k">ASN</div><div class="kv-v">${escHtml(node.asn || '—')}</div>
+    </div>
+    <div class="insp-section-title">Sockets neste Nó</div>
+    <div>${connsHtml}</div>
+  `;
+
+  $('inspBody')
+    .querySelectorAll('[data-insp-conn]')
+    .forEach((el) => {
+      el.addEventListener('click', () => {
+        const k = el.getAttribute('data-insp-conn');
+        const c = snap?.conns.find((x) => x.k === k);
+        if (c) openConnectionInspector(c);
+      });
+    });
+}
+
+function openCountryInspector(countryName) {
+  const snap = state.snapshot;
+  if (!snap) return;
+  const geo = snap.geo || {};
+  const matching = snap.conns.filter(
+    (c) => geo[c.rip]?.country?.toLowerCase() === countryName.toLowerCase()
+  );
+
+  document.body.classList.add('right-open');
+  $('inspectorPanel').classList.remove('hidden');
+  $('inspEyebrow').textContent = 'FILTRO POR PAÍS';
+  $('inspTitle').textContent = countryName;
+
+  const procs = new Set(matching.map((c) => c.proc));
+  const ips = new Set(matching.map((c) => c.rip));
+
+  $('inspBody').innerHTML = `
+    <div class="kv-grid">
+      <div class="kv-k">Conexões</div><div class="kv-v">${matching.length}</div>
+      <div class="kv-k">IPs Únicos</div><div class="kv-v">${ips.size}</div>
+      <div class="kv-k">Aplicações</div><div class="kv-v">${procs.size}</div>
+    </div>
+    <div class="insp-section-title">Top Conexões em ${escHtml(countryName)}</div>
+    <div>
+      ${matching
+        .slice(0, 30)
+        .map(
+          (c) => `
+          <div class="list-item" data-country-conn="${escHtml(c.k)}">
+            <div class="item-top">
+              <span class="item-proc">${escHtml(c.proc)}</span>
+              <span class="state-pill ${stateBadgeClass(c)}">${escHtml(c.state)}</span>
+            </div>
+            <div class="item-sub">
+              <span class="mono-cut">${escHtml(c.rip)}:${c.rport}</span>
+              <span>${escHtml(geo[c.rip]?.city || '')}</span>
+            </div>
+          </div>`
+        )
+        .join('')}
+    </div>
+  `;
+
+  $('inspBody')
+    .querySelectorAll('[data-country-conn]')
+    .forEach((el) => {
+      el.addEventListener('click', () => {
+        const k = el.getAttribute('data-country-conn');
+        const c = snap.conns.find((x) => x.k === k);
+        if (c) openConnectionInspector(c);
+      });
+    });
+}
+
+function closeInspector() {
+  document.body.classList.remove('right-open');
+  $('inspectorPanel').classList.add('hidden');
+}
+
+function applyAndRender() {
+  if (!state.snapshot) return;
+  const filtered = getFilteredConnections();
+  updateKpisAndBanner(filtered);
+  mapCanvas.updateTelemetry({
+    host: state.snapshot.host,
+    geo: state.snapshot.geo || {},
+    filteredConns: filtered,
+  });
+  renderPanel(filtered);
+}
+
+function syncTabButtons() {
+  document.querySelectorAll('.tab-btn').forEach((btn) => {
+    btn.classList.toggle('active', btn.getAttribute('data-tab') === state.tab);
+  });
+}
+
+function connectWebSocket() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+  ws.onopen = () => {
+    $('connDot').className = state.paused ? 'brand-pulse paused' : 'brand-pulse online';
+    const interval = $('intervalSelect').value;
+    ws.send(`interval:${interval}`);
+  };
+
+  ws.onmessage = (ev) => {
+    if (state.paused) return;
+    try {
+      const data = JSON.parse(ev.data);
+      state.snapshot = data;
+      state.rxHistory.push(data.nic?.rxBps || 0);
+      state.rxHistory.shift();
+      state.txHistory.push(data.nic?.txBps || 0);
+      state.txHistory.shift();
+      drawSparkline();
+      applyAndRender();
+    } catch {
+      // ignore malformed packet
+    }
+  };
+
+  ws.onclose = () => {
+    $('connDot').className = 'brand-pulse offline';
+    $('engineStatus').textContent = 'Desconectado — reconectando...';
+    reconnectTimer = setTimeout(connectWebSocket, 1200);
+  };
+
+  ws.onerror = () => {
+    ws.close();
+  };
+}
+
+async function init() {
+  // Load bundled offline Natural Earth 110m world vector map
+  try {
+    const resp = await fetch('/assets/countries-110m.json');
+    const topo = await resp.json();
+    const features = decodeTopoJson(topo, 'countries');
+    mapCanvas.setFeatures(features);
+    mapCanvas.start();
+  } catch (err) {
+    $('engineStatus').textContent = `Erro ao carregar mapa: ${err.message}`;
+  }
+
+  // UI Event Bindings
+  $('projectionSelect').addEventListener('change', (e) => {
+    mapCanvas.setProjection(e.target.value);
+  });
+
+  $('btnTerminator').addEventListener('click', (e) => {
+    mapCanvas.showTerminator = !mapCanvas.showTerminator;
+    e.currentTarget.classList.toggle('active', mapCanvas.showTerminator);
+  });
+
+  $('btnArcs').addEventListener('click', (e) => {
+    mapCanvas.showArcs = !mapCanvas.showArcs;
+    e.currentTarget.classList.toggle('active', mapCanvas.showArcs);
+  });
+
+  $('btnLan').addEventListener('click', (e) => {
+    mapCanvas.showLan = !mapCanvas.showLan;
+    e.currentTarget.classList.toggle('active', mapCanvas.showLan);
+    applyAndRender();
+  });
+
+  $('btnLabels').addEventListener('click', (e) => {
+    mapCanvas.showLabels = !mapCanvas.showLabels;
+    e.currentTarget.classList.toggle('active', mapCanvas.showLabels);
+  });
+
+  $('intervalSelect').addEventListener('change', (e) => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(`interval:${e.target.value}`);
+    }
+  });
+
+  const togglePause = () => {
+    state.paused = !state.paused;
+    const btn = $('btnPause');
+    btn.textContent = state.paused ? 'Retomar' : 'Pausar';
+    btn.classList.toggle('paused', state.paused);
+    $('connDot').className = state.paused ? 'brand-pulse paused' : 'brand-pulse online';
+    if (state.paused) {
+      $('engineStatus').textContent = 'Stream pausado (inspecionando)';
+    }
+  };
+  $('btnPause').addEventListener('click', togglePause);
+
+  $('btnReset').addEventListener('click', () => mapCanvas.fitPlanet());
+  $('btnZoomFit').addEventListener('click', () => mapCanvas.fitPlanet());
+  $('btnZoomIn').addEventListener('click', () => mapCanvas.zoomBy(1.35));
+  $('btnZoomOut').addEventListener('click', () => mapCanvas.zoomBy(1 / 1.35));
+
+  $('toggleLeftBtn').addEventListener('click', () => {
+    const open = document.body.classList.toggle('left-open');
+    $('toggleLeftBtn').textContent = open ? '◀' : '▶';
+    mapCanvas.fitPlanet();
+  });
+
+  $('closeInspectorBtn').addEventListener('click', () => {
+    state.selectedNodeKey = null;
+    state.selectedConnKey = null;
+    closeInspector();
+  });
+
+  document.querySelectorAll('.tab-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.tab = btn.getAttribute('data-tab');
+      syncTabButtons();
+      renderPanel();
+    });
+  });
+
+  document.querySelectorAll('.chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      state.filter = chip.getAttribute('data-filter');
+      document.querySelectorAll('.chip').forEach((c) => c.classList.toggle('active', c === chip));
+      applyAndRender();
+    });
+  });
+
+  $('searchInput').addEventListener('input', (e) => {
+    state.search = e.target.value;
+    applyAndRender();
+  });
+
+  // Keyboard shortcuts
+  window.addEventListener('keydown', (e) => {
+    const inInput = document.activeElement === $('searchInput');
+    if (e.key === 'Escape') {
+      if (inInput) {
+        $('searchInput').blur();
+      } else {
+        closeInspector();
+        state.selectedNodeKey = null;
+        state.selectedConnKey = null;
+        state.selectedCountry = null;
+        mapCanvas.selectedNodeKey = null;
+        mapCanvas.selectedCountryName = null;
+        applyAndRender();
+      }
+      return;
+    }
+    if (inInput) return;
+
+    if (e.code === 'Space') {
+      e.preventDefault();
+      togglePause();
+    } else if (e.key === 'r' || e.key === 'R') {
+      mapCanvas.fitPlanet();
+    } else if (e.key === 'f' || e.key === 'F') {
+      e.preventDefault();
+      if (!document.body.classList.contains('left-open')) {
+        document.body.classList.add('left-open');
+        $('toggleLeftBtn').textContent = '◀';
+      }
+      $('searchInput').focus();
+    }
+  });
+
+  connectWebSocket();
+}
+
+init();

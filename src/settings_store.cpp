@@ -100,6 +100,10 @@ void SettingsStore::load() {
       std::string k, v;
       if (!parseLine(line, k, v)) continue;
       if (k == "alertsEnabled") settings_.alertsEnabled = (v == "1" || v == "true");
+      else if (k == "notifyServiceDown") settings_.notifyServiceDown = (v == "1" || v == "true");
+      else if (k == "notifyServiceDegraded") settings_.notifyServiceDegraded = (v == "1" || v == "true");
+      else if (k == "notifySensitivePort") settings_.notifySensitivePort = (v == "1" || v == "true");
+      else if (k == "notifyNewCountry") settings_.notifyNewCountry = (v == "1" || v == "true");
       else if (k == "autoStart") settings_.autoStart = (v == "1" || v == "true");
       else if (k == "defaultView") settings_.defaultView = (v == "global") ? "global" : "local";
       else if (k == "minimizeToTray") settings_.minimizeToTray = (v == "1" || v == "true");
@@ -115,6 +119,10 @@ void SettingsStore::save() {
   std::ofstream out(path_, std::ios::trunc);
   if (!out.is_open()) return;
   out << "alertsEnabled\t" << (settings_.alertsEnabled ? "1" : "0") << '\n'
+      << "notifyServiceDown\t" << (settings_.notifyServiceDown ? "1" : "0") << '\n'
+      << "notifyServiceDegraded\t" << (settings_.notifyServiceDegraded ? "1" : "0") << '\n'
+      << "notifySensitivePort\t" << (settings_.notifySensitivePort ? "1" : "0") << '\n'
+      << "notifyNewCountry\t" << (settings_.notifyNewCountry ? "1" : "0") << '\n'
       << "autoStart\t" << (settings_.autoStart ? "1" : "0") << '\n'
       << "defaultView\t" << settings_.defaultView << '\n'
       << "minimizeToTray\t" << (settings_.minimizeToTray ? "1" : "0") << '\n';
@@ -147,6 +155,14 @@ std::string SettingsStore::toJson() const {
   AppSettings s = get();
   std::string out = "{\"alertsEnabled\":";
   out += (s.alertsEnabled ? "true" : "false");
+  out += ",\"notifyServiceDown\":";
+  out += (s.notifyServiceDown ? "true" : "false");
+  out += ",\"notifyServiceDegraded\":";
+  out += (s.notifyServiceDegraded ? "true" : "false");
+  out += ",\"notifySensitivePort\":";
+  out += (s.notifySensitivePort ? "true" : "false");
+  out += ",\"notifyNewCountry\":";
+  out += (s.notifyNewCountry ? "true" : "false");
   out += ",\"autoStart\":";
   out += (s.autoStart ? "true" : "false");
   out += ",\"defaultView\":";

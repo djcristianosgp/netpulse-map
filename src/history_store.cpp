@@ -63,6 +63,21 @@ void HistoryStore::setAlertCallback(AlertCallback cb) {
   alertCb_ = std::move(cb);
 }
 
+void HistoryStore::setNotificationCategories(const NotificationCategories& cats) {
+  std::lock_guard lock(mutex_);
+  categories_ = cats;
+}
+
+bool HistoryStore::shouldNotifyKind(const std::string& kind) const {
+  if (!alertsEnabled_.load()) return false;
+  std::lock_guard lock(mutex_);
+  if (kind == "service_down" || kind == "service_up") return categories_.serviceDown;
+  if (kind == "service_degraded") return categories_.serviceDegraded;
+  if (kind == "sensitive_port") return categories_.sensitivePort;
+  if (kind == "new_country") return categories_.newCountry;
+  return true;
+}
+
 void HistoryStore::loadFromDisk() {
   const uint64_t cutoff = (nowEpochMs() > kRetentionMs) ? (nowEpochMs() - kRetentionMs) : 0;
 
@@ -196,7 +211,8 @@ void HistoryStore::processTelemetry(const TelemetrySnapshot& snap, const GeoDnsS
   }
 
   for (auto& ev : pendingEvents) {
-    appendEvent(std::move(ev), ev.severity != "info");
+    const bool notify = shouldNotifyKind(ev.kind);
+    appendEvent(std::move(ev), notify);
   }
 }
 
@@ -256,7 +272,8 @@ void HistoryStore::processServices(const std::vector<ServiceStatus>& services) {
   }
 
   for (auto& ev : transitions) {
-    appendEvent(std::move(ev), true);
+    const bool notify = shouldNotifyKind(ev.kind);
+    appendEvent(std::move(ev), notify);
   }
 }
 

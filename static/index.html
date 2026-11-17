@@ -178,13 +178,40 @@
         <button class="close-btn" id="btnCloseSettings" title="Fechar (Esc)">✕</button>
       </div>
       <form id="settingsForm" class="modal-body">
-        <label class="setting-row">
-          <div>
-            <div class="setting-name">Notificações na bandeja</div>
-            <div class="setting-desc">Alertar quando um serviço cair, surgir porta sensível ou novo país.</div>
+        <div class="notify-group">
+          <label class="setting-row" style="border:none;padding:0;background:transparent">
+            <div>
+              <div class="setting-name">Notificações na bandeja</div>
+              <div class="setting-desc">Habilita ou silencia todos os alertas do Windows.</div>
+            </div>
+            <input type="checkbox" id="cfgAlertsEnabled" class="switch-chk" />
+          </label>
+          <div class="notify-cats-head">
+            <span>Categorias notificadas</span>
+            <div style="display:flex;gap:6px">
+              <button type="button" class="mini-pill-btn" id="btnEnableAllNotif">Habilitar todas</button>
+              <button type="button" class="mini-pill-btn" id="btnDisableAllNotif">Desabilitar todas</button>
+            </div>
           </div>
-          <input type="checkbox" id="cfgAlertsEnabled" class="switch-chk" />
-        </label>
+          <div class="notify-cats" id="cfgNotifyCategories">
+            <label class="cat-chk-row">
+              <span>Serviço offline / restabelecido</span>
+              <input type="checkbox" id="cfgNotifyServiceDown" class="switch-chk" />
+            </label>
+            <label class="cat-chk-row">
+              <span>Latência elevada em serviços</span>
+              <input type="checkbox" id="cfgNotifyServiceDegraded" class="switch-chk" />
+            </label>
+            <label class="cat-chk-row">
+              <span>Portas sensíveis (SSH, RDP, SMB, DBs)</span>
+              <input type="checkbox" id="cfgNotifySensitivePort" class="switch-chk" />
+            </label>
+            <label class="cat-chk-row">
+              <span>Novo país acessado</span>
+              <input type="checkbox" id="cfgNotifyNewCountry" class="switch-chk" />
+            </label>
+          </div>
+        </div>
 
         <label class="setting-row">
           <div>

@@ -599,9 +599,12 @@ async function renderHistoryPanel(container) {
     const headerHtml = `
       <div class="bw-banner">
         <span>Notificações na Bandeja</span>
-        <button class="ctrl-btn ${alertsOn ? 'active' : ''}" id="btnToggleTrayAlerts" style="height:24px;font-size:10.5px;padding:0 8px">
-          ${alertsOn ? 'Ativadas' : 'Silenciadas'}
-        </button>
+        <div style="display:flex;gap:5px">
+          <button class="ctrl-btn" id="btnAlertCats" style="height:24px;font-size:10.5px;padding:0 8px">⚙ Categorias</button>
+          <button class="ctrl-btn ${alertsOn ? 'active' : ''}" id="btnToggleTrayAlerts" style="height:24px;font-size:10.5px;padding:0 8px">
+            ${alertsOn ? 'Ativadas' : 'Silenciadas'}
+          </button>
+        </div>
       </div>
     `;
 
@@ -626,6 +629,9 @@ async function renderHistoryPanel(container) {
 
     container.innerHTML = headerHtml + listHtml;
     container.dataset.hasHistory = '1';
+
+    const cbtn = $('btnAlertCats');
+    if (cbtn) cbtn.onclick = openSettingsModal;
 
     const tbtn = $('btnToggleTrayAlerts');
     if (tbtn) {
@@ -1176,6 +1182,27 @@ async function init() {
     if (e.target === $('settingsModal')) closeSettingsModal();
   });
 
+  const catIds = [
+    'cfgNotifyServiceDown',
+    'cfgNotifyServiceDegraded',
+    'cfgNotifySensitivePort',
+    'cfgNotifyNewCountry',
+  ];
+
+  $('cfgAlertsEnabled').addEventListener('change', syncNotifyCategoryDisabledState);
+
+  $('btnEnableAllNotif').addEventListener('click', () => {
+    $('cfgAlertsEnabled').checked = true;
+    catIds.forEach((id) => { $(id).checked = true; });
+    syncNotifyCategoryDisabledState();
+  });
+
+  $('btnDisableAllNotif').addEventListener('click', () => {
+    $('cfgAlertsEnabled').checked = false;
+    catIds.forEach((id) => { $(id).checked = false; });
+    syncNotifyCategoryDisabledState();
+  });
+
   $('settingsForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const fb = $('settingsFeedback');
@@ -1183,6 +1210,10 @@ async function init() {
     fb.textContent = 'Salvando configurações...';
     const payload = {
       alertsEnabled: $('cfgAlertsEnabled').checked,
+      notifyServiceDown: $('cfgNotifyServiceDown').checked,
+      notifyServiceDegraded: $('cfgNotifyServiceDegraded').checked,
+      notifySensitivePort: $('cfgNotifySensitivePort').checked,
+      notifyNewCountry: $('cfgNotifyNewCountry').checked,
       autoStart: $('cfgAutoStart').checked,
       minimizeToTray: $('cfgMinimizeToTray').checked,
       defaultView: $('cfgDefaultView').value,
@@ -1352,6 +1383,15 @@ async function loadInitialSettings() {
   } catch {}
 }
 
+function syncNotifyCategoryDisabledState() {
+  const masterOn = $('cfgAlertsEnabled').checked;
+  const wrap = $('cfgNotifyCategories');
+  wrap.classList.toggle('disabled', !masterOn);
+  wrap.querySelectorAll('input[type="checkbox"]').forEach((chk) => {
+    chk.disabled = !masterOn;
+  });
+}
+
 async function openSettingsModal() {
   $('settingsFeedback').classList.add('hidden');
   $('settingsModal').classList.remove('hidden');
@@ -1360,6 +1400,11 @@ async function openSettingsModal() {
     if (!resp.ok) return;
     const cfg = await resp.json();
     $('cfgAlertsEnabled').checked = !!cfg.alertsEnabled;
+    $('cfgNotifyServiceDown').checked = cfg.notifyServiceDown !== false;
+    $('cfgNotifyServiceDegraded').checked = cfg.notifyServiceDegraded !== false;
+    $('cfgNotifySensitivePort').checked = cfg.notifySensitivePort !== false;
+    $('cfgNotifyNewCountry').checked = cfg.notifyNewCountry !== false;
+    syncNotifyCategoryDisabledState();
     $('cfgAutoStart').checked = !!cfg.autoStart;
     $('cfgMinimizeToTray').checked = !!cfg.minimizeToTray;
     $('cfgDefaultView').value = cfg.defaultView === 'global' ? 'global' : 'local';

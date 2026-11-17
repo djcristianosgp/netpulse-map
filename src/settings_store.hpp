@@ -9,6 +9,10 @@ namespace netpulse {
 
 struct AppSettings {
   bool alertsEnabled = true;
+  bool notifyServiceDown = true;
+  bool notifyServiceDegraded = true;
+  bool notifySensitivePort = true;
+  bool notifyNewCountry = true;
   bool autoStart = false;
   std::string defaultView = "local"; // "local" | "global"
   bool minimizeToTray = true;

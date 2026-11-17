@@ -389,14 +389,44 @@ int testSettingsStorePersistence() {
     std::ofstream out(tempPath);
     out << "alertsEnabled\t0\n"
         << "defaultView\tglobal\n"
-        << "minimizeToTray\t0\n";
+        << "minimizeToTray\t0\n"
+        << "notifyServiceDown\t1\n"
+        << "notifyServiceDegraded\t0\n"
+        << "notifySensitivePort\t1\n"
+        << "notifyNewCountry\t0\n";
   }
   SettingsStore store(tempPath);
   auto cfg = store.get();
   CHECK(!cfg.alertsEnabled);
   CHECK(cfg.defaultView == "global");
   CHECK(!cfg.minimizeToTray);
+  CHECK(cfg.notifyServiceDown);
+  CHECK(!cfg.notifyServiceDegraded);
+  CHECK(cfg.notifySensitivePort);
+  CHECK(!cfg.notifyNewCountry);
   CHECK(store.toJson().find("\"defaultView\":\"global\"") != std::string::npos);
+  CHECK(store.toJson().find("\"notifyServiceDegraded\":false") != std::string::npos);
+
+  auto histDir = std::filesystem::temp_directory_path() / "netpulse_settings_hist_test";
+  std::filesystem::remove_all(histDir, ec);
+  {
+    HistoryStore hist(histDir);
+    hist.setAlertsEnabled(true);
+    NotificationCategories cats;
+    cats.serviceDown = true;
+    cats.serviceDegraded = false;
+    cats.sensitivePort = true;
+    cats.newCountry = false;
+    hist.setNotificationCategories(cats);
+    CHECK(hist.shouldNotifyKind("service_down"));
+    CHECK(hist.shouldNotifyKind("service_up"));
+    CHECK(!hist.shouldNotifyKind("service_degraded"));
+    CHECK(hist.shouldNotifyKind("sensitive_port"));
+    CHECK(!hist.shouldNotifyKind("new_country"));
+    hist.setAlertsEnabled(false);
+    CHECK(!hist.shouldNotifyKind("service_down"));
+  }
+  std::filesystem::remove_all(histDir, ec);
 
   std::filesystem::remove(tempPath, ec);
   std::cout << "[PASS] testSettingsStorePersistence\n";

@@ -215,7 +215,16 @@ int main(int argc, char** argv) {
   netpulse::setMinimizeToTrayEnabled(initCfg.minimizeToTray);
 
   netpulse::HistoryStore history(dataDir);
-  history.setAlertsEnabled(initCfg.alertsEnabled);
+  auto syncHistoryNotifications = [&](const netpulse::AppSettings& cfg) {
+    history.setAlertsEnabled(cfg.alertsEnabled);
+    history.setNotificationCategories(netpulse::NotificationCategories{
+        cfg.notifyServiceDown,
+        cfg.notifyServiceDegraded,
+        cfg.notifySensitivePort,
+        cfg.notifyNewCountry,
+    });
+  };
+  syncHistoryNotifications(initCfg);
   history.setAlertCallback([](const std::string& title, const std::string& body, bool isWarning) {
     netpulse::showTrayBalloon(title, body, isWarning);
   });
@@ -318,14 +327,19 @@ int main(int argc, char** argv) {
     }
     if (path == "/api/settings" && method == "POST") {
       auto nextCfg = settingsStore.get();
-      std::string sAlerts = extractSimpleJsonField(body, "alertsEnabled");
-      if (!sAlerts.empty()) nextCfg.alertsEnabled = (sAlerts == "true" || sAlerts == "1");
-      std::string sAuto = extractSimpleJsonField(body, "autoStart");
-      if (!sAuto.empty()) nextCfg.autoStart = (sAuto == "true" || sAuto == "1");
+      auto parseBool = [](const std::string& val, bool fallback) {
+        if (val.empty()) return fallback;
+        return (val == "true" || val == "1");
+      };
+      nextCfg.alertsEnabled = parseBool(extractSimpleJsonField(body, "alertsEnabled"), nextCfg.alertsEnabled);
+      nextCfg.notifyServiceDown = parseBool(extractSimpleJsonField(body, "notifyServiceDown"), nextCfg.notifyServiceDown);
+      nextCfg.notifyServiceDegraded = parseBool(extractSimpleJsonField(body, "notifyServiceDegraded"), nextCfg.notifyServiceDegraded);
+      nextCfg.notifySensitivePort = parseBool(extractSimpleJsonField(body, "notifySensitivePort"), nextCfg.notifySensitivePort);
+      nextCfg.notifyNewCountry = parseBool(extractSimpleJsonField(body, "notifyNewCountry"), nextCfg.notifyNewCountry);
+      nextCfg.autoStart = parseBool(extractSimpleJsonField(body, "autoStart"), nextCfg.autoStart);
       std::string sView = extractSimpleJsonField(body, "defaultView");
       if (sView == "local" || sView == "global") nextCfg.defaultView = sView;
-      std::string sMin = extractSimpleJsonField(body, "minimizeToTray");
-      if (!sMin.empty()) nextCfg.minimizeToTray = (sMin == "true" || sMin == "1");
+      nextCfg.minimizeToTray = parseBool(extractSimpleJsonField(body, "minimizeToTray"), nextCfg.minimizeToTray);
 
       std::string err;
       if (!settingsStore.update(nextCfg, err)) {
@@ -334,7 +348,7 @@ int main(int argc, char** argv) {
         resp.push_back('}');
         return {400, resp};
       }
-      history.setAlertsEnabled(nextCfg.alertsEnabled);
+      syncHistoryNotifications(nextCfg);
       netpulse::setMinimizeToTrayEnabled(nextCfg.minimizeToTray);
       return {200, settingsStore.toJson()};
     }

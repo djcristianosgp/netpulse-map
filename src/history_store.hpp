@@ -32,6 +32,13 @@ struct ServiceMetricPoint {
   double latencyMs = 0.0;
 };
 
+struct NotificationCategories {
+  bool serviceDown = true;
+  bool serviceDegraded = true;
+  bool sensitivePort = true;
+  bool newCountry = true;
+};
+
 bool isSensitivePort(uint16_t port);
 
 class HistoryStore {
@@ -43,6 +50,8 @@ public:
   void setAlertCallback(AlertCallback cb);
   void setAlertsEnabled(bool enabled) { alertsEnabled_.store(enabled); }
   bool alertsEnabled() const { return alertsEnabled_.load(); }
+  void setNotificationCategories(const NotificationCategories& cats);
+  bool shouldNotifyKind(const std::string& kind) const;
 
   void processTelemetry(const TelemetrySnapshot& snap, const GeoDnsService& geoDns);
   void processServices(const std::vector<ServiceStatus>& services);
@@ -70,6 +79,7 @@ private:
   uint64_t startupWarmupEndMs_ = 0;
 
   std::atomic<bool> alertsEnabled_{true};
+  NotificationCategories categories_;
   AlertCallback alertCb_;
 };
 

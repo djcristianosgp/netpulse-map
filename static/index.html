@@ -26,6 +26,11 @@
       <a class="update-notes-link" id="updateNotesLink" href="#" target="_blank" rel="noopener">Notas</a>
     </div>
 
+    <div class="view-switch glass-sub" id="viewModeSwitch" title="Alternar entre suas conexões locais e a visão global intercontinental">
+      <button class="view-btn active" data-view="local">📍 Minha Conexão</button>
+      <button class="view-btn" data-view="global">🌍 Global &amp; Serviços</button>
+    </div>
+
     <div class="throughput-box">
       <div class="tp-metrics">
         <div class="tp-row rx"><span>↓ RX</span><strong id="rxRate">0 B/s</strong></div>
@@ -72,15 +77,42 @@
     <button class="panel-toggle-left glass" id="toggleLeftBtn" title="Recolher/Expandir painel">◀</button>
 
     <div class="panel-header">
-      <div class="tab-bar">
+      <div class="tab-bar" id="localTabs">
         <button class="tab-btn active" data-tab="conns">Conexões</button>
         <button class="tab-btn" data-tab="procs">Processos</button>
         <button class="tab-btn" data-tab="countries">Países</button>
       </div>
+      <div class="tab-bar tab-bar-2 hidden" id="globalTabs">
+        <button class="tab-btn active" data-gtab="services">Serviços</button>
+        <button class="tab-btn" data-gtab="continents">Continentes</button>
+      </div>
+      <div class="global-actions hidden" id="globalActions">
+        <button class="ctrl-btn active" id="btnProbeServices" style="flex:1">↻ Testar Agora</button>
+        <button class="ctrl-btn" id="btnToggleAddService">+ Serviço</button>
+      </div>
+      <form id="addServiceForm" class="add-svc-form hidden">
+        <input id="svcName" type="text" placeholder="Nome (ex: Meu API)" required />
+        <div class="add-svc-row">
+          <input id="svcHost" type="text" placeholder="Host ou IP (ex: api.exemplo.com)" required />
+          <input id="svcPort" type="number" value="443" min="1" max="65535" style="width:74px" required />
+        </div>
+        <div class="add-svc-row">
+          <select id="svcContinent" class="ctrl-select" style="flex:1">
+            <option value="SA">América do Sul</option>
+            <option value="NA">América do Norte</option>
+            <option value="EU">Europa</option>
+            <option value="AF">África</option>
+            <option value="AS">Ásia</option>
+            <option value="OC">Oceania</option>
+            <option value="GLOBAL">Global / Anycast</option>
+          </select>
+          <button type="submit" class="ctrl-btn active">Salvar</button>
+        </div>
+      </form>
       <div class="search-wrap">
         <input id="searchInput" type="search" placeholder="Buscar IP, domínio, app, país, porta... (F)" autocomplete="off" />
       </div>
-      <div class="filter-chips">
+      <div class="filter-chips" id="localFilterChips">
         <button class="chip active" data-filter="all">Todas</button>
         <button class="chip" data-filter="public">Públicas</button>
         <button class="chip" data-filter="lan">LAN</button>

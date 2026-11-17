@@ -45,13 +45,16 @@ function stateBadgeClass(c) {
 const state = {
   paused: false,
   snapshot: null,
-  tab: 'conns',       // 'conns' | 'procs' | 'countries'
-  filter: 'all',      // 'all' | 'public' | 'lan' | 'established' | 'new'
+  viewMode: 'local',    // 'local' | 'global'
+  tab: 'conns',         // 'conns' | 'procs' | 'countries'
+  globalTab: 'services',// 'services' | 'continents'
+  filter: 'all',        // 'all' | 'public' | 'lan' | 'established' | 'new'
   search: '',
   selectedCountry: null,
   selectedProcess: null,
   selectedConnKey: null,
   selectedNodeKey: null,
+  selectedServiceId: null,
   rxHistory: new Array(60).fill(0),
   txHistory: new Array(60).fill(0),
 };
@@ -73,8 +76,28 @@ const mapCanvas = new PlanetMapCanvas($('planetCanvas'), {
   onZoomChange(zoom) {
     $('zoomLevel').textContent = `${Math.round(zoom * 100)}%`;
   },
-  onHover({ x, y, node, country, countryCount }) {
+  onHover({ x, y, node, service, country, countryCount }) {
     const tt = $('mapTooltip');
+    if (service) {
+      const rtt =
+        service.status === 'down'
+          ? `OFFLINE (${service.err || 'falha'})`
+          : service.checksTotal > 0
+          ? `${service.latencyMs.toFixed(1)} ms (média ${service.avgLatencyMs.toFixed(1)} ms)`
+          : 'Medindo...';
+      const extra =
+        service.category === 'continent'
+          ? ` · ${mapCanvas.continentTraffic.get(service.continent) || 0} conexões suas`
+          : ` · Uptime ${service.uptimePct}%`;
+      tt.innerHTML = `
+        <div class="tt-title">${escHtml(service.name)}</div>
+        <div class="tt-sub">${escHtml(service.host)}:${service.port}</div>
+        <div class="tt-sub">${escHtml(rtt)}${escHtml(extra)}</div>
+      `;
+      positionTooltip(tt, x, y);
+      tt.classList.remove('hidden');
+      return;
+    }
     if (node) {
       const procs = Array.from(node.processes).slice(0, 4).join(', ');
       const place = [node.city, node.country].filter(Boolean).join(', ');
@@ -103,6 +126,12 @@ const mapCanvas = new PlanetMapCanvas($('planetCanvas'), {
     state.selectedConnKey = node.conns[0]?.k || null;
     state.selectedCountry = null;
     openNodeInspector(node);
+    renderPanel();
+  },
+  onSelectService(svc) {
+    state.selectedServiceId = svc.id;
+    state.selectedCountry = null;
+    openServiceInspector(svc);
     renderPanel();
   },
   onSelectCountry(countryName) {
@@ -275,6 +304,11 @@ function renderPanel(filteredConns = getFilteredConnections()) {
     return;
   }
 
+  if (state.viewMode === 'global') {
+    renderGlobalPanel(container, snap);
+    return;
+  }
+
   const prevScroll = container.scrollTop;
   const geo = snap.geo || {};
   const dns = snap.dns || {};
@@ -427,6 +461,128 @@ function renderPanel(filteredConns = getFilteredConnections()) {
   }
 
   container.scrollTop = prevScroll;
+}
+
+function serviceStatusMeta(st) {
+  if (st === 'up') return { label: 'ONLINE', cls: 'new' };
+  if (st === 'degraded') return { label: 'LENTO', cls: 'syn' };
+  if (st === 'down') return { label: 'OFFLINE', cls: 'closed' };
+  return { label: 'TESTANDO', cls: '' };
+}
+
+function renderGlobalPanel(container, snap) {
+  const prevScroll = container.scrollTop;
+  const services = snap.services || [];
+  const q = state.search.trim().toLowerCase();
+
+  const matches = services.filter((s) => {
+    if (state.globalTab === 'continents' && s.category !== 'continent') return false;
+    if (state.globalTab === 'services' && s.category === 'continent') return false;
+    if (!q) return true;
+    return [s.name, s.host, s.continent, s.region, s.ip, s.status].join(' ').toLowerCase().includes(q);
+  });
+
+  if (matches.length === 0) {
+    container.innerHTML = '<div class="list-item"><div class="item-sub">Nenhum serviço ou continente encontrado.</div></div>';
+    return;
+  }
+
+  container.innerHTML = matches
+    .map((s) => {
+      const meta = serviceStatusMeta(s.status);
+      const rtt =
+        s.status === 'down'
+          ? s.err || 'Falha'
+          : s.checksTotal > 0
+          ? `${s.latencyMs.toFixed(1)} ms`
+          : '...';
+      const localConns =
+        s.category === 'continent' ? mapCanvas.continentTraffic.get(s.continent) || 0 : null;
+      const sel = state.selectedServiceId === s.id ? 'selected' : '';
+      return `
+        <div class="list-item ${sel}" data-svc-id="${escHtml(s.id)}">
+          <div class="item-top">
+            <span class="item-proc">${escHtml(s.name)}</span>
+            <div>
+              <span class="state-pill ${meta.cls}">${meta.label} · ${escHtml(rtt)}</span>
+              ${s.custom ? `<button class="svc-del-btn" data-del-svc="${escHtml(s.id)}" title="Remover">✕</button>` : ''}
+            </div>
+          </div>
+          <div class="item-sub">
+            <span class="mono-cut">${escHtml(s.host)}:${s.port}${s.ip ? ' · ' + escHtml(s.ip) : ''}</span>
+            <span>${s.uptimePct}% up</span>
+          </div>
+          <div class="item-geo">
+            ${
+              localConns !== null
+                ? `Suas conexões neste continente: ${localConns} · Média: ${s.avgLatencyMs.toFixed(1)} ms`
+                : `${escHtml(s.region)} (${escHtml(s.continent)}) · Média: ${s.avgLatencyMs.toFixed(1)} ms`
+            }
+          </div>
+        </div>
+      `;
+    })
+    .join('');
+
+  container.querySelectorAll('[data-svc-id]').forEach((el) => {
+    el.addEventListener('click', (e) => {
+      if (e.target && e.target.hasAttribute('data-del-svc')) return;
+      const id = el.getAttribute('data-svc-id');
+      const svc = services.find((x) => x.id === id);
+      if (!svc) return;
+      state.selectedServiceId = id;
+      mapCanvas.selectedServiceId = id;
+      mapCanvas.flyTo(svc.lon, svc.lat, 2.2);
+      openServiceInspector(svc);
+      renderPanel();
+    });
+  });
+
+  container.querySelectorAll('[data-del-svc]').forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const id = btn.getAttribute('data-del-svc');
+      try {
+        await fetch('/api/services/remove', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id }),
+        });
+        const resp = await fetch('/api/services');
+        if (resp.ok && state.snapshot) {
+          state.snapshot.services = await resp.json();
+          applyAndRender();
+        }
+      } catch {}
+    });
+  });
+
+  container.scrollTop = prevScroll;
+}
+
+function openServiceInspector(s) {
+  const meta = serviceStatusMeta(s.status);
+  const localConns =
+    s.category === 'continent' ? mapCanvas.continentTraffic.get(s.continent) || 0 : null;
+
+  document.body.classList.add('right-open');
+  $('inspectorPanel').classList.remove('hidden');
+  $('inspEyebrow').textContent =
+    s.category === 'continent' ? `HUB CONTINENTAL · ${s.continent}` : `SERVIÇO MONITORADO · ${s.continent}`;
+  $('inspTitle').textContent = s.name;
+
+  $('inspBody').innerHTML = `
+    <div class="kv-grid">
+      <div class="kv-k">Status</div><div class="kv-v">${meta.label}</div>
+      <div class="kv-k">Endpoint</div><div class="kv-v">${escHtml(s.host)}:${s.port}</div>
+      <div class="kv-k">IP Resolvido</div><div class="kv-v">${escHtml(s.ip || '—')}</div>
+      <div class="kv-k">Latência Atual</div><div class="kv-v">${s.checksTotal > 0 && s.status !== 'down' ? s.latencyMs.toFixed(1) + ' ms' : escHtml(s.err || '—')}</div>
+      <div class="kv-k">Média RTT</div><div class="kv-v">${s.avgLatencyMs.toFixed(1)} ms</div>
+      <div class="kv-k">Disponibilidade</div><div class="kv-v">${s.uptimePct}% (${s.checksTotal} testes)</div>
+      <div class="kv-k">Localidade</div><div class="kv-v">${escHtml(s.region)} (${s.lat.toFixed(2)}, ${s.lon.toFixed(2)})</div>
+      ${localConns !== null ? `<div class="kv-k">Suas Conexões</div><div class="kv-v">${localConns} ativas neste continente</div>` : ''}
+    </div>
+  `;
 }
 
 function openConnectionInspector(c) {
@@ -582,12 +738,14 @@ function applyAndRender() {
     host: state.snapshot.host,
     geo: state.snapshot.geo || {},
     filteredConns: filtered,
+    allConns: state.snapshot.conns || [],
+    services: state.snapshot.services || [],
   });
   renderPanel(filtered);
 }
 
 function syncTabButtons() {
-  document.querySelectorAll('.tab-btn').forEach((btn) => {
+  document.querySelectorAll('.tab-btn[data-tab]').forEach((btn) => {
     btn.classList.toggle('active', btn.getAttribute('data-tab') === state.tab);
   });
 }
@@ -707,12 +865,96 @@ async function init() {
     closeInspector();
   });
 
-  document.querySelectorAll('.tab-btn').forEach((btn) => {
+  document.querySelectorAll('.tab-btn[data-tab]').forEach((btn) => {
     btn.addEventListener('click', () => {
       state.tab = btn.getAttribute('data-tab');
       syncTabButtons();
       renderPanel();
     });
+  });
+
+  document.querySelectorAll('.tab-btn[data-gtab]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.globalTab = btn.getAttribute('data-gtab');
+      document.querySelectorAll('.tab-btn[data-gtab]').forEach((b) => {
+        b.classList.toggle('active', b.getAttribute('data-gtab') === state.globalTab);
+      });
+      renderPanel();
+    });
+  });
+
+  document.querySelectorAll('.view-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const mode = btn.getAttribute('data-view');
+      state.viewMode = mode;
+      document.querySelectorAll('.view-btn').forEach((b) => b.classList.toggle('active', b === btn));
+      const isGlobal = mode === 'global';
+      $('localTabs').classList.toggle('hidden', isGlobal);
+      $('localFilterChips').classList.toggle('hidden', isGlobal);
+      $('globalTabs').classList.toggle('hidden', !isGlobal);
+      $('globalActions').classList.toggle('hidden', !isGlobal);
+      if (!isGlobal) $('addServiceForm').classList.add('hidden');
+      closeInspector();
+      mapCanvas.setViewMode(mode);
+      applyAndRender();
+    });
+  });
+
+  $('btnProbeServices').addEventListener('click', async () => {
+    try {
+      await fetch('/api/services/probe', { method: 'POST' });
+      setTimeout(async () => {
+        const resp = await fetch('/api/services');
+        if (resp.ok && state.snapshot) {
+          state.snapshot.services = await resp.json();
+          applyAndRender();
+        }
+      }, 900);
+    } catch {}
+  });
+
+  $('btnToggleAddService').addEventListener('click', () => {
+    $('addServiceForm').classList.toggle('hidden');
+  });
+
+  const CONTINENT_COORDS = {
+    SA: [-23.5505, -46.6333],
+    NA: [39.0438, -77.4874],
+    EU: [50.1109, 8.6821],
+    AF: [-33.9249, 18.4241],
+    AS: [35.6762, 139.6503],
+    OC: [-33.8688, 151.2093],
+    GLOBAL: [20.0, 0.0],
+  };
+
+  $('addServiceForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const cont = $('svcContinent').value;
+    const [lat, lon] = CONTINENT_COORDS[cont] || [0, 0];
+    const payload = {
+      name: $('svcName').value.trim(),
+      host: $('svcHost').value.trim(),
+      port: parseInt($('svcPort').value, 10) || 443,
+      continent: cont,
+      lat,
+      lon,
+    };
+    try {
+      const resp = await fetch('/api/services/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (resp.ok) {
+        $('svcName').value = '';
+        $('svcHost').value = '';
+        $('addServiceForm').classList.add('hidden');
+        if (state.snapshot) {
+          state.snapshot.services = await resp.json();
+          applyAndRender();
+        }
+      }
+    } catch {}
   });
 
   document.querySelectorAll('.chip').forEach((chip) => {

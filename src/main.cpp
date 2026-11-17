@@ -12,6 +12,8 @@
 #include "geo_dns.hpp"
 #include "net_monitor.hpp"
 #include "serializer.hpp"
+#include "service_monitor.hpp"
+#include "tray_host.hpp"
 #include "updater.hpp"
 #include "version.hpp"
 #include "ws_server.hpp"
@@ -115,6 +117,29 @@ void launchAppWindow(const std::string& url, bool useAppMode) {
   ShellExecuteW(nullptr, L"open", wUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
+std::string extractSimpleJsonField(const std::string& body, const std::string& key) {
+  const std::string needle = "\"" + key + "\"";
+  size_t pos = body.find(needle);
+  if (pos == std::string::npos) return {};
+  pos = body.find(':', pos + needle.size());
+  if (pos == std::string::npos) return {};
+  ++pos;
+  while (pos < body.size() && (body[pos] == ' ' || body[pos] == '\t')) ++pos;
+  if (pos >= body.size()) return {};
+  if (body[pos] == '"') {
+    ++pos;
+    std::string out;
+    while (pos < body.size() && body[pos] != '"') {
+      if (body[pos] == '\\' && pos + 1 < body.size()) ++pos;
+      out.push_back(body[pos++]);
+    }
+    return out;
+  }
+  size_t end = pos;
+  while (end < body.size() && body[end] != ',' && body[end] != '}' && body[end] != ' ') ++end;
+  return body.substr(pos, end - pos);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -138,8 +163,15 @@ int main(int argc, char** argv) {
 
   WSADATA wsa{};
   if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-    std::cerr << "[NetPulse] WSAStartup failed.\n";
     return 1;
+  }
+
+  void* instanceMutex = nullptr;
+  if (openBrowser && port == 8740) {
+    if (!netpulse::acquireSingleInstanceOrFocusExisting(&instanceMutex)) {
+      WSACleanup();
+      return 0;
+    }
   }
 
   SetConsoleCtrlHandler(consoleCtrlHandler, TRUE);
@@ -152,7 +184,13 @@ int main(int argc, char** argv) {
   netpulse::GeoDnsService geoDns(dataDir / "geoip_cache.tsv");
   geoDns.start();
 
-  netpulse::UpdateManager updater(netpulse::kAppVersion, []() { gRunning.store(false); });
+  netpulse::ServiceMonitor serviceMon(dataDir / "custom_services.tsv");
+  serviceMon.start();
+
+  netpulse::UpdateManager updater(netpulse::kAppVersion, []() {
+    gRunning.store(false);
+    netpulse::requestTrayQuit();
+  });
   updater.startAutoCheck();
 
   netpulse::NetMonitor monitor;
@@ -172,7 +210,9 @@ int main(int argc, char** argv) {
            ",\"wsClients\":" + std::to_string(server.clientCount()) + "}";
   });
 
-  server.setApiCallback([&](const std::string& method, const std::string& path) -> std::pair<int, std::string> {
+  server.setApiCallback([&](const std::string& method,
+                            const std::string& path,
+                            const std::string& body) -> std::pair<int, std::string> {
     if (path == "/api/update/status" && method == "GET") {
       return {200, updater.getStatusJson()};
     }
@@ -183,6 +223,33 @@ int main(int argc, char** argv) {
     if (path == "/api/update/apply" && method == "POST") {
       bool started = updater.startInstallAsync();
       return {started ? 202 : 409, updater.getStatusJson()};
+    }
+    if (path == "/api/services" && method == "GET") {
+      return {200, serviceMon.getServicesJson()};
+    }
+    if (path == "/api/services/probe" && method == "POST") {
+      serviceMon.probeNowAsync();
+      return {202, serviceMon.getServicesJson()};
+    }
+    if (path == "/api/services/add" && method == "POST") {
+      std::string name = extractSimpleJsonField(body, "name");
+      std::string host = extractSimpleJsonField(body, "host");
+      int portNum = std::atoi(extractSimpleJsonField(body, "port").c_str());
+      if (portNum <= 0 || portNum > 65535) portNum = 443;
+      std::string cont = extractSimpleJsonField(body, "continent");
+      double lat = std::strtod(extractSimpleJsonField(body, "lat").c_str(), nullptr);
+      double lon = std::strtod(extractSimpleJsonField(body, "lon").c_str(), nullptr);
+      if (!serviceMon.addCustomService(name, host, static_cast<uint16_t>(portNum), cont, lat, lon)) {
+        return {400, "{\"error\":\"invalid_service\"}"};
+      }
+      return {201, serviceMon.getServicesJson()};
+    }
+    if (path == "/api/services/remove" && method == "POST") {
+      std::string id = extractSimpleJsonField(body, "id");
+      if (!serviceMon.removeCustomService(id)) {
+        return {404, "{\"error\":\"not_found\"}"};
+      }
+      return {200, serviceMon.getServicesJson()};
     }
     return {404, "{\"error\":\"not_found\"}"};
   });
@@ -206,65 +273,84 @@ int main(int argc, char** argv) {
       if (c.scope == netpulse::IpScope::Public) pubs.push_back(c.remoteIp);
     }
     geoDns.enqueueLookups(pubs);
-    server.setLatestSnapshotJson(netpulse::serializeSnapshotJson(snap, geoDns, intervalMs.load(), 0));
+    server.setLatestSnapshotJson(
+        netpulse::serializeSnapshotJson(snap, geoDns, intervalMs.load(), 0, &serviceMon));
   }
 
   if (!server.start()) {
-    std::cerr << "[NetPulse] Failed to bind 127.0.0.1:" << port << "\n";
+    serviceMon.stop();
+    updater.stop();
     geoDns.stop();
+    netpulse::releaseSingleInstance(instanceMutex);
     WSACleanup();
     return 1;
   }
 
   const std::string url = "http://127.0.0.1:" + std::to_string(server.port());
-  std::cout << "[NetPulse Map] Native C++20 Engine online at " << url << "\n";
-  std::cout << "[NetPulse Map] Root: " << rootDir.string() << "\n";
-  std::cout << "[NetPulse Map] Press Ctrl+C to stop.\n";
 
   if (openBrowser) {
     launchAppWindow(url, useAppMode);
   }
 
-  uint64_t lastIdleSerializeMs = nowMs();
+  std::jthread pollThread([&](std::stop_token st) {
+    uint64_t lastIdleSerializeMs = nowMs();
+    while (gRunning.load() && !st.stop_requested()) {
+      const uint64_t tickStart = nowMs();
+      auto snap = monitor.poll(tickStart);
+      snap.hostGeo = geoDns.getHostGeo();
+      lastPollUs.store(snap.pollLatencyUs);
 
-  while (gRunning.load()) {
-    const uint64_t tickStart = nowMs();
-    auto snap = monitor.poll(tickStart);
-    snap.hostGeo = geoDns.getHostGeo();
-    lastPollUs.store(snap.pollLatencyUs);
+      std::vector<std::string> pubs;
+      pubs.reserve(snap.publicConnections);
+      for (const auto& c : snap.connections) {
+        if (c.scope == netpulse::IpScope::Public) {
+          pubs.push_back(c.remoteIp);
+        }
+      }
+      if (!pubs.empty()) {
+        geoDns.enqueueLookups(pubs);
+      }
 
-    std::vector<std::string> pubs;
-    pubs.reserve(snap.publicConnections);
-    for (const auto& c : snap.connections) {
-      if (c.scope == netpulse::IpScope::Public) {
-        pubs.push_back(c.remoteIp);
+      const size_t clients = server.clientCount();
+      if (clients > 0 || (tickStart - lastIdleSerializeMs) >= 1500) {
+        std::string json =
+            netpulse::serializeSnapshotJson(snap, geoDns, intervalMs.load(), clients, &serviceMon);
+        server.setLatestSnapshotJson(json);
+        if (clients > 0) {
+          server.broadcastText(json);
+        }
+        lastIdleSerializeMs = tickStart;
+      }
+
+      const uint32_t targetMs = intervalMs.load();
+      const uint64_t elapsed = nowMs() - tickStart;
+      if (elapsed < targetMs) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(targetMs - elapsed));
       }
     }
-    if (!pubs.empty()) {
-      geoDns.enqueueLookups(pubs);
-    }
+  });
 
-    const size_t clients = server.clientCount();
-    if (clients > 0 || (tickStart - lastIdleSerializeMs) >= 1500) {
-      std::string json = netpulse::serializeSnapshotJson(snap, geoDns, intervalMs.load(), clients);
-      server.setLatestSnapshotJson(json);
-      if (clients > 0) {
-        server.broadcastText(json);
-      }
-      lastIdleSerializeMs = tickStart;
-    }
-
-    const uint32_t targetMs = intervalMs.load();
-    const uint64_t elapsed = nowMs() - tickStart;
-    if (elapsed < targetMs) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(targetMs - elapsed));
+  if (openBrowser) {
+    netpulse::TrayCallbacks cb;
+    cb.onOpenApp = [url, useAppMode]() { launchAppWindow(url, useAppMode); };
+    cb.onOpenBrowser = [url]() { launchAppWindow(url, false); };
+    cb.onCheckUpdates = [&updater]() { updater.checkNowAsync(); };
+    cb.onQuit = []() { gRunning.store(false); };
+    netpulse::runTrayMessageLoop(url, gRunning, std::move(cb));
+  } else {
+    while (gRunning.load()) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(150));
     }
   }
 
-  std::cout << "\n[NetPulse Map] Shutting down...\n";
+  gRunning.store(false);
+  pollThread.request_stop();
+  pollThread.join();
+  serviceMon.stop();
   updater.stop();
   server.stop();
   geoDns.stop();
+  netpulse::releaseSingleInstance(instanceMutex);
   WSACleanup();
   return 0;
 }

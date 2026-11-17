@@ -12,6 +12,7 @@
 #include "../src/geo_dns.hpp"
 #include "../src/net_monitor.hpp"
 #include "../src/serializer.hpp"
+#include "../src/service_monitor.hpp"
 #include "../src/updater.hpp"
 #include "../src/ws_server.hpp"
 
@@ -239,6 +240,37 @@ int testSemVerAndReleaseParsing() {
   return 0;
 }
 
+int testServiceMonitorParsing() {
+  ServiceTarget t;
+  CHECK(parseCustomServiceLine("custom-1\tMeu API\tapi.example.com\t8443\tEU\t50.11\t8.68", t));
+  CHECK(t.id == "custom-1");
+  CHECK(t.name == "Meu API");
+  CHECK(t.host == "api.example.com");
+  CHECK(t.port == 8443);
+  CHECK(t.continent == "EU");
+  CHECK(t.custom);
+  CHECK(!parseCustomServiceLine("# comment", t));
+  CHECK(!parseCustomServiceLine("bad\tline", t));
+
+  auto tempSvc = std::filesystem::temp_directory_path() / "netpulse_svc_test.tsv";
+  std::error_code ec;
+  std::filesystem::remove(tempSvc, ec);
+  {
+    ServiceMonitor mon(tempSvc);
+    auto snap = mon.getSnapshot();
+    CHECK(snap.size() >= 17); // 6 continents + 11 global services
+    CHECK(mon.addCustomService("Local Echo", "127.0.0.1", 80, "SA", -23.5, -46.6));
+    auto snap2 = mon.getSnapshot();
+    CHECK(snap2.size() == snap.size() + 1);
+    std::string customId = snap2.back().target.id;
+    CHECK(mon.removeCustomService(customId));
+    CHECK(mon.getSnapshot().size() == snap.size());
+  }
+  std::filesystem::remove(tempSvc, ec);
+  std::cout << "[PASS] testServiceMonitorParsing\n";
+  return 0;
+}
+
 int main() {
   WSADATA wsa{};
   if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
@@ -249,6 +281,7 @@ int main() {
   rc |= testWebSocketRfc6455();
   rc |= testLiveMonitorAndWsLoopback();
   rc |= testSemVerAndReleaseParsing();
+  rc |= testServiceMonitorParsing();
 
   WSACleanup();
   if (rc == 0) {

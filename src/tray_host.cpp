@@ -1,0 +1,206 @@
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+#include <windows.h>
+#include <shellapi.h>
+
+#include "tray_host.hpp"
+
+#include <atomic>
+
+namespace netpulse {
+
+namespace {
+
+constexpr wchar_t kTrayClassName[] = L"NetPulse2DTrayClass";
+constexpr wchar_t kMutexName[] = L"NetPulse2D_SingleInstance_Mutex";
+
+constexpr UINT WM_TRAY_CALLBACK = WM_APP + 1;
+constexpr UINT WM_OPEN_EXISTING = WM_APP + 2;
+
+constexpr UINT ID_MENU_OPEN_APP = 1001;
+constexpr UINT ID_MENU_OPEN_BROWSER = 1002;
+constexpr UINT ID_MENU_CHECK_UPDATE = 1003;
+constexpr UINT ID_MENU_QUIT = 1004;
+
+struct TrayState {
+  TrayCallbacks callbacks;
+  std::atomic<bool>* runningFlag = nullptr;
+  NOTIFYICONDATAW nid{};
+  UINT taskbarCreatedMsg = 0;
+  bool iconAdded = false;
+};
+
+std::atomic<HWND> gTrayHwnd{nullptr};
+
+void addTrayIcon(TrayState* st) {
+  if (!st || !st->nid.hWnd) return;
+  if (Shell_NotifyIconW(NIM_ADD, &st->nid)) {
+    st->iconAdded = true;
+  }
+}
+
+void removeTrayIcon(TrayState* st) {
+  if (!st || !st->iconAdded) return;
+  Shell_NotifyIconW(NIM_DELETE, &st->nid);
+  st->iconAdded = false;
+}
+
+void showContextMenu(HWND hwnd, TrayState* st) {
+  POINT pt{};
+  GetCursorPos(&pt);
+
+  HMENU menu = CreatePopupMenu();
+  if (!menu) return;
+
+  AppendMenuW(menu, MF_STRING, ID_MENU_OPEN_APP, L"Abrir Mapa 2D");
+  AppendMenuW(menu, MF_STRING, ID_MENU_OPEN_BROWSER, L"Abrir no Navegador");
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(menu, MF_STRING, ID_MENU_CHECK_UPDATE, L"Verificar Atualizações");
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(menu, MF_STRING, ID_MENU_QUIT, L"Sair do NetPulse 2D");
+  SetMenuDefaultItem(menu, ID_MENU_OPEN_APP, FALSE);
+
+  SetForegroundWindow(hwnd);
+  UINT cmd = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+                            pt.x, pt.y, 0, hwnd, nullptr);
+  DestroyMenu(menu);
+  PostMessageW(hwnd, WM_NULL, 0, 0);
+
+  if (cmd == ID_MENU_OPEN_APP && st->callbacks.onOpenApp) {
+    st->callbacks.onOpenApp();
+  } else if (cmd == ID_MENU_OPEN_BROWSER && st->callbacks.onOpenBrowser) {
+    st->callbacks.onOpenBrowser();
+  } else if (cmd == ID_MENU_CHECK_UPDATE && st->callbacks.onCheckUpdates) {
+    st->callbacks.onCheckUpdates();
+  } else if (cmd == ID_MENU_QUIT) {
+    if (st->runningFlag) st->runningFlag->store(false);
+    if (st->callbacks.onQuit) st->callbacks.onQuit();
+    DestroyWindow(hwnd);
+  }
+}
+
+LRESULT CALLBACK trayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  auto* st = reinterpret_cast<TrayState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+
+  if (st && st->taskbarCreatedMsg != 0 && msg == st->taskbarCreatedMsg) {
+    addTrayIcon(st);
+    return 0;
+  }
+
+  switch (msg) {
+    case WM_TRAY_CALLBACK:
+      if (lParam == WM_LBUTTONDBLCLK || lParam == WM_LBUTTONUP) {
+        if (st && st->callbacks.onOpenApp) st->callbacks.onOpenApp();
+      } else if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) {
+        if (st) showContextMenu(hwnd, st);
+      }
+      return 0;
+
+    case WM_OPEN_EXISTING:
+      if (st && st->callbacks.onOpenApp) st->callbacks.onOpenApp();
+      return 0;
+
+    case WM_CLOSE:
+      if (st && st->runningFlag) st->runningFlag->store(false);
+      DestroyWindow(hwnd);
+      return 0;
+
+    case WM_DESTROY:
+      if (st) removeTrayIcon(st);
+      gTrayHwnd.store(nullptr);
+      PostQuitMessage(0);
+      return 0;
+
+    default:
+      return DefWindowProcW(hwnd, msg, wParam, lParam);
+  }
+}
+
+} // namespace
+
+bool acquireSingleInstanceOrFocusExisting(void** outMutexHandle) {
+  HANDLE hMutex = CreateMutexW(nullptr, TRUE, kMutexName);
+  if (hMutex && GetLastError() == ERROR_ALREADY_EXISTS) {
+    HWND existing = FindWindowW(kTrayClassName, nullptr);
+    if (existing) {
+      PostMessageW(existing, WM_OPEN_EXISTING, 0, 0);
+    }
+    CloseHandle(hMutex);
+    *outMutexHandle = nullptr;
+    return false;
+  }
+  *outMutexHandle = hMutex;
+  return true;
+}
+
+void releaseSingleInstance(void* mutexHandle) {
+  if (mutexHandle) {
+    HANDLE h = static_cast<HANDLE>(mutexHandle);
+    ReleaseMutex(h);
+    CloseHandle(h);
+  }
+}
+
+void requestTrayQuit() {
+  HWND hwnd = gTrayHwnd.load();
+  if (hwnd) {
+    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+  }
+}
+
+void runTrayMessageLoop(const std::string& /*url*/,
+                        std::atomic<bool>& runningFlag,
+                        TrayCallbacks callbacks) {
+  HINSTANCE hInst = GetModuleHandleW(nullptr);
+
+  WNDCLASSEXW wc{};
+  wc.cbSize = sizeof(wc);
+  wc.lpfnWndProc = trayWndProc;
+  wc.hInstance = hInst;
+  wc.lpszClassName = kTrayClassName;
+  RegisterClassExW(&wc);
+
+  TrayState state;
+  state.callbacks = std::move(callbacks);
+  state.runningFlag = &runningFlag;
+  state.taskbarCreatedMsg = RegisterWindowMessageW(L"TaskbarCreated");
+
+  HWND hwnd = CreateWindowExW(0, kTrayClassName, L"NetPulse 2D", WS_OVERLAPPEDWINDOW,
+                              0, 0, 0, 0, nullptr, nullptr, hInst, nullptr);
+  if (!hwnd) {
+    while (runningFlag.load()) {
+      Sleep(200);
+    }
+    return;
+  }
+
+  SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&state));
+  gTrayHwnd.store(hwnd);
+
+  state.nid.cbSize = sizeof(NOTIFYICONDATAW);
+  state.nid.hWnd = hwnd;
+  state.nid.uID = 1;
+  state.nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+  state.nid.uCallbackMessage = WM_TRAY_CALLBACK;
+  state.nid.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(1));
+  if (!state.nid.hIcon) {
+    state.nid.hIcon = LoadIconW(nullptr, MAKEINTRESOURCEW(32512));
+  }
+  wcscpy_s(state.nid.szTip, L"NetPulse 2D — Mapa de Conexões");
+  addTrayIcon(&state);
+
+  MSG msg;
+  while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+    TranslateMessage(&msg);
+    DispatchMessageW(&msg);
+  }
+
+  UnregisterClassW(kTrayClassName, hInst);
+}
+
+} // namespace netpulse

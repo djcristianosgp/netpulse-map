@@ -37,6 +37,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
+AppMutex=NetPulse2D_SingleInstance_Mutex
 CloseApplications=yes
 CloseApplicationsFilter=netpulse.exe
 RestartApplications=no

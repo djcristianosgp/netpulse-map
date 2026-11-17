@@ -21,7 +21,8 @@ class WsServer {
 public:
   using CommandCallback = std::function<void(const std::string&)>;
   using HealthCallback = std::function<std::string()>;
-  using ApiCallback = std::function<std::pair<int, std::string>(const std::string& method, const std::string& path)>;
+  using ApiCallback = std::function<std::pair<int, std::string>(
+      const std::string& method, const std::string& path, const std::string& body)>;
 
   WsServer(uint16_t port,
            std::filesystem::path staticDir,

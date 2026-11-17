@@ -2,6 +2,7 @@
 
 #include "geo_dns.hpp"
 #include "models.hpp"
+#include "service_monitor.hpp"
 #include "version.hpp"
 
 #include <cstdio>
@@ -13,7 +14,8 @@ namespace netpulse {
 inline std::string serializeSnapshotJson(const TelemetrySnapshot& snap,
                                          const GeoDnsService& geoDns,
                                          uint32_t intervalMs,
-                                         size_t wsClients) {
+                                         size_t wsClients,
+                                         const ServiceMonitor* serviceMon = nullptr) {
   std::string out;
   out.reserve(4096 + snap.connections.size() * 192);
 
@@ -168,7 +170,12 @@ inline std::string serializeSnapshotJson(const TelemetrySnapshot& snap,
     out += std::to_string(age);
     out.push_back('}');
   }
-  out += "]}";
+  out.push_back(']');
+  if (serviceMon) {
+    out += ",\"services\":";
+    out += serviceMon->getServicesJson();
+  }
+  out.push_back('}');
   return out;
 }
 

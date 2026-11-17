@@ -24,6 +24,41 @@ function colorForState(state, life) {
   return STATE_COLORS[state] || '#38bdf8';
 }
 
+const BACKBONE_PAIRS = [
+  ['cont-sa', 'cont-na'],
+  ['cont-sa', 'cont-eu'],
+  ['cont-sa', 'cont-af'],
+  ['cont-na', 'cont-eu'],
+  ['cont-na', 'cont-as'],
+  ['cont-eu', 'cont-af'],
+  ['cont-eu', 'cont-as'],
+  ['cont-af', 'cont-as'],
+  ['cont-as', 'cont-oc'],
+];
+
+function statusColor(status) {
+  if (status === 'up') return '#10b981';
+  if (status === 'degraded') return '#fbbf24';
+  if (status === 'down') return '#f43f5e';
+  return '#94a3b8';
+}
+
+function continentFromGeo(g) {
+  if (!g) return 'GLOBAL';
+  const { lat, lon, cc } = g;
+  if (['BR', 'AR', 'CL', 'CO', 'PE', 'UY', 'PY', 'BO', 'EC', 'VE', 'GY', 'SR'].includes(cc)) return 'SA';
+  if (['US', 'CA', 'MX', 'PA', 'CR', 'GT', 'CU', 'DO', 'PR'].includes(cc)) return 'NA';
+  if (['AU', 'NZ', 'FJ', 'PG'].includes(cc)) return 'OC';
+  if (['ZA', 'NG', 'EG', 'KE', 'MA', 'AO', 'GH', 'ET', 'TZ', 'TN', 'DZ'].includes(cc)) return 'AF';
+  if (['JP', 'SG', 'CN', 'HK', 'TW', 'KR', 'IN', 'ID', 'TH', 'VN', 'MY', 'PH', 'AE', 'SA', 'IL', 'TR'].includes(cc)) return 'AS';
+  if (lat < 13 && lon >= -85 && lon <= -30) return 'SA';
+  if (lat >= 13 && lon >= -170 && lon <= -50) return 'NA';
+  if (lat <= -10 && lon >= 110) return 'OC';
+  if (lat >= -36 && lat <= 36 && lon >= -20 && lon <= 52) return 'AF';
+  if (lon > 45) return 'AS';
+  return 'EU';
+}
+
 export class PlanetMapCanvas {
   constructor(canvas, callbacks = {}) {
     this.canvas = canvas;
@@ -47,14 +82,20 @@ export class PlanetMapCanvas {
     this.showArcs = true;
     this.showLan = false;
     this.showLabels = true;
+    this.viewMode = 'local'; // 'local' | 'global'
 
     this.nodes = [];
     this.lanNodes = [];
+    this.services = [];
+    this.backboneArcs = [];
+    this.continentTraffic = new Map();
     this.countryCounts = new Map(); // countryCode / countryName -> count
     this.host = { lat: -23.55, lon: -46.63, city: 'Local Host', country: 'Local', resolved: false };
 
     this.hoveredNode = null;
     this.selectedNodeKey = null;
+    this.hoveredService = null;
+    this.selectedServiceId = null;
     this.hoveredCountry = null;
     this.selectedCountryName = null;
 
@@ -226,6 +267,64 @@ export class PlanetMapCanvas {
     this.nodes = nextNodes;
     this.lanNodes = lanList;
     this.countryCounts = countryTotals;
+
+    // Aggregate active user connections per continent
+    const contTotals = new Map([
+      ['SA', 0],
+      ['NA', 0],
+      ['EU', 0],
+      ['AF', 0],
+      ['AS', 0],
+      ['OC', 0],
+    ]);
+    for (const c of data.allConns || data.filteredConns) {
+      if (c.scope !== 'public') continue;
+      const cont = continentFromGeo(data.geo[c.rip]);
+      if (contTotals.has(cont)) {
+        contTotals.set(cont, contTotals.get(cont) + 1);
+      }
+    }
+    this.continentTraffic = contTotals;
+
+    if (Array.isArray(data.services)) {
+      // Spread non-continent services slightly if sharing exact coordinates so every pin is clickable
+      const coordBuckets = new Map();
+      this.services = data.services.map((s) => {
+        let plotLat = s.lat;
+        let plotLon = s.lon;
+        if (s.category !== 'continent') {
+          const bKey = `${s.lat.toFixed(1)},${s.lon.toFixed(1)}`;
+          const idx = coordBuckets.get(bKey) || 0;
+          coordBuckets.set(bKey, idx + 1);
+          if (idx > 0) {
+            const ang = (idx * 2.2) % (Math.PI * 2);
+            const dist = 3.2 + Math.floor(idx / 3) * 2.2;
+            plotLat = Math.max(-75, Math.min(75, s.lat + Math.sin(ang) * dist));
+            plotLon = Math.max(-175, Math.min(175, s.lon + Math.cos(ang) * dist * 1.3));
+          }
+        }
+        return { ...s, _lat: plotLat, _lon: plotLon };
+      });
+
+      const byId = new Map(this.services.map((s) => [s.id, s]));
+      this.backboneArcs = BACKBONE_PAIRS.map(([aId, bId]) => {
+        const a = byId.get(aId);
+        const b = byId.get(bId);
+        if (!a || !b) return null;
+        return {
+          a,
+          b,
+          segments: buildGreatCircleSegments(a.lon, a.lat, b.lon, b.lat, 38),
+        };
+      }).filter(Boolean);
+    }
+  }
+
+  setViewMode(mode) {
+    if (mode !== 'local' && mode !== 'global') return;
+    this.viewMode = mode;
+    this.hoveredNode = null;
+    this.hoveredService = null;
   }
 
   resize() {
@@ -509,6 +608,183 @@ export class PlanetMapCanvas {
     // Day/night terminator
     this.drawTerminator(ctx);
 
+    if (this.viewMode === 'global') {
+      this.renderGlobalLayer(ctx, timeSec);
+    } else {
+      this.renderLocalLayer(ctx, timeSec);
+    }
+
+    ctx.restore();
+  }
+
+  renderGlobalLayer(ctx, timeSec) {
+    const [hx, hy] = this.projectToScreen(this.host.lon, this.host.lat);
+
+    // Subtle background context of your local connections
+    if (this.showArcs) {
+      ctx.save();
+      ctx.globalAlpha = 0.16;
+      ctx.lineWidth = 0.8;
+      ctx.strokeStyle = '#38bdf8';
+      for (const node of this.nodes) {
+        for (const seg of node.segments) {
+          if (seg.length < 2) continue;
+          ctx.beginPath();
+          for (let i = 0; i < seg.length; i++) {
+            const [sx, sy] = this.projectToScreen(seg[i][0], seg[i][1]);
+            if (i === 0) ctx.moveTo(sx, sy);
+            else ctx.lineTo(sx, sy);
+          }
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
+
+    // Intercontinental backbone corridors
+    for (let bIdx = 0; bIdx < this.backboneArcs.length; bIdx++) {
+      const link = this.backboneArcs[bIdx];
+      const aDown = link.a.status === 'down' || link.b.status === 'down';
+      const aDeg = link.a.status === 'degraded' || link.b.status === 'degraded';
+      const isHot =
+        this.hoveredService &&
+        (this.hoveredService.id === link.a.id || this.hoveredService.id === link.b.id);
+      const col = aDown ? '#f43f5e' : aDeg ? '#fbbf24' : '#38bdf8';
+
+      ctx.save();
+      ctx.lineWidth = isHot ? 2.6 : 1.7;
+      ctx.strokeStyle = isHot ? '#ffffff' : col;
+      ctx.globalAlpha = isHot ? 0.95 : 0.62;
+      if (isHot) {
+        ctx.shadowColor = col;
+        ctx.shadowBlur = 10;
+      }
+
+      const pts = [];
+      for (const seg of link.segments) {
+        if (seg.length < 2) continue;
+        ctx.beginPath();
+        for (let i = 0; i < seg.length; i++) {
+          const [sx, sy] = this.projectToScreen(seg[i][0], seg[i][1]);
+          pts.push([sx, sy]);
+          if (i === 0) ctx.moveTo(sx, sy);
+          else ctx.lineTo(sx, sy);
+        }
+        ctx.stroke();
+      }
+      ctx.restore();
+
+      // Bidirectional pulses along intercontinental corridors
+      if (!aDown && pts.length >= 2) {
+        for (let dir = 0; dir < 2; dir++) {
+          const rawPhase = (timeSec * 0.24 + bIdx * 0.17 + dir * 0.5) % 1;
+          const phase = dir === 0 ? rawPhase : 1 - rawPhase;
+          const idx = Math.min(pts.length - 1, Math.floor(phase * (pts.length - 1)));
+          const [px, py] = pts[idx];
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(px, py, isHot ? 3.2 : 2.3, 0, Math.PI * 2);
+          ctx.fillStyle = dir === 0 ? '#67e8f9' : '#6ee7b7';
+          ctx.shadowColor = col;
+          ctx.shadowBlur = 8;
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+    }
+
+    // Draw non-continent services first, then continental hubs on top
+    const ordered = [
+      ...this.services.filter((s) => s.category !== 'continent'),
+      ...this.services.filter((s) => s.category === 'continent'),
+    ];
+
+    for (const s of ordered) {
+      const [sx, sy] = this.projectToScreen(s._lon, s._lat);
+      s._sx = sx;
+      s._sy = sy;
+
+      const isCont = s.category === 'continent';
+      const isHot =
+        (this.hoveredService && this.hoveredService.id === s.id) ||
+        this.selectedServiceId === s.id;
+      const col = statusColor(s.status);
+      const r = (isCont ? 9 : 5.2) + (isHot ? 2 : 0);
+
+      if (isCont) {
+        const pulse = (timeSec * 0.8 + (Math.abs(s.lon) % 1)) % 1;
+        ctx.beginPath();
+        ctx.arc(sx, sy, r + pulse * 14, 0, Math.PI * 2);
+        ctx.strokeStyle = col;
+        ctx.globalAlpha = (1 - pulse) * 0.55;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+
+      ctx.beginPath();
+      ctx.arc(sx, sy, r + 3, 0, Math.PI * 2);
+      ctx.fillStyle = col;
+      ctx.globalAlpha = isHot ? 0.42 : 0.22;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+
+      ctx.beginPath();
+      ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      ctx.fillStyle = isHot ? '#ffffff' : col;
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = '#030712';
+      ctx.stroke();
+
+      if (isCont) {
+        ctx.font = '700 9px "JetBrains Mono", Consolas, monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#030712';
+        ctx.fillText(s.continent, sx, sy + 0.5);
+
+        const localCount = this.continentTraffic.get(s.continent) || 0;
+        const rttTxt = s.status === 'down' ? 'OFF' : s.checksTotal > 0 ? `${Math.round(s.latencyMs)}ms` : '...';
+        const label = `${s.continent} · ${rttTxt}${localCount > 0 ? ` · ${localCount} conn` : ''}`;
+
+        ctx.font = '600 10.5px "JetBrains Mono", Consolas, monospace';
+        ctx.textAlign = 'left';
+        const tw = ctx.measureText(label).width + 10;
+        ctx.fillStyle = 'rgba(2, 6, 23, 0.85)';
+        ctx.fillRect(sx + r + 5, sy - 9, tw, 18);
+        ctx.strokeStyle = 'rgba(56, 189, 248, 0.35)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(sx + r + 5, sy - 9, tw, 18);
+        ctx.fillStyle = '#f8fafc';
+        ctx.fillText(label, sx + r + 10, sy);
+      } else if (this.showLabels && (isHot || this.zoom >= 1.35)) {
+        const rttTxt = s.status === 'down' ? 'OFF' : s.checksTotal > 0 ? `${Math.round(s.latencyMs)}ms` : '...';
+        const label = `${s.name} · ${rttTxt}`;
+        ctx.font = '500 10.5px Inter, system-ui, sans-serif';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        const tw = ctx.measureText(label).width + 9;
+        ctx.fillStyle = 'rgba(2, 6, 23, 0.82)';
+        ctx.fillRect(sx + r + 4, sy - 8.5, tw, 17);
+        ctx.fillStyle = '#e2e8f0';
+        ctx.fillText(label, sx + r + 8, sy);
+      }
+    }
+
+    // Host beacon marker
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(hx, hy, 4.5, 0, Math.PI * 2);
+    ctx.fillStyle = '#10b981';
+    ctx.strokeStyle = '#ecfdf5';
+    ctx.lineWidth = 1.5;
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  renderLocalLayer(ctx, timeSec) {
     // Geodesic Connection Arcs + Animated Pulses
     const [hx, hy] = this.projectToScreen(this.host.lon, this.host.lat);
 
@@ -687,8 +963,6 @@ export class PlanetMapCanvas {
       ctx.fillText(originLabel, hx + 17, hy);
     }
     ctx.restore();
-
-    ctx.restore();
   }
 
   hitTestNode(mx, my) {
@@ -700,6 +974,20 @@ export class PlanetMapCanvas {
       if (d < bestDist) {
         bestDist = d;
         best = node;
+      }
+    }
+    return best;
+  }
+
+  hitTestService(mx, my) {
+    let best = null;
+    let bestDist = 18;
+    for (const s of this.services) {
+      if (s._sx === undefined) continue;
+      const d = Math.hypot(mx - s._sx, my - s._sy);
+      if (d < bestDist) {
+        bestDist = d;
+        best = s;
       }
     }
     return best;
@@ -736,20 +1024,28 @@ export class PlanetMapCanvas {
       const ll = this.screenToLonLat(mx, my);
       this.callbacks.onCursorCoords?.(ll);
 
-      const hitNode = this.hitTestNode(mx, my);
+      let hitNode = null;
+      let hitSvc = null;
+      if (this.viewMode === 'global') {
+        hitSvc = this.hitTestService(mx, my);
+      } else {
+        hitNode = this.hitTestNode(mx, my);
+      }
       this.hoveredNode = hitNode;
+      this.hoveredService = hitSvc;
 
       let hitCountry = null;
-      if (!hitNode && ll && this.features.length > 0) {
+      if (!hitNode && !hitSvc && ll && this.features.length > 0) {
         hitCountry = findCountryAt(this.features, ll[0], ll[1]);
       }
       this.hoveredCountry = hitCountry;
 
-      this.canvas.style.cursor = hitNode || hitCountry ? 'pointer' : 'grab';
+      this.canvas.style.cursor = hitNode || hitSvc || hitCountry ? 'pointer' : 'grab';
       this.callbacks.onHover?.({
         x: e.clientX,
         y: e.clientY,
         node: hitNode,
+        service: hitSvc,
         country: hitCountry,
         countryCount: hitCountry ? this.countryCounts.get(hitCountry.name.toLowerCase()) || 0 : 0,
       });
@@ -758,18 +1054,29 @@ export class PlanetMapCanvas {
     window.addEventListener('mouseup', (e) => {
       if (!this.isDragging) return;
       this.isDragging = false;
-      this.canvas.style.cursor = this.hoveredNode || this.hoveredCountry ? 'pointer' : 'grab';
+      this.canvas.style.cursor =
+        this.hoveredNode || this.hoveredService || this.hoveredCountry ? 'pointer' : 'grab';
 
       if (!this.dragMoved && e.target === this.canvas) {
         const rect = this.canvas.getBoundingClientRect();
         const mx = e.clientX - rect.left;
         const my = e.clientY - rect.top;
-        const hitNode = this.hitTestNode(mx, my);
-        if (hitNode) {
-          this.selectedNodeKey = hitNode.key;
-          this.selectedCountryName = null;
-          this.callbacks.onSelectNode?.(hitNode);
-          return;
+        if (this.viewMode === 'global') {
+          const hitSvc = this.hitTestService(mx, my);
+          if (hitSvc) {
+            this.selectedServiceId = hitSvc.id;
+            this.selectedCountryName = null;
+            this.callbacks.onSelectService?.(hitSvc);
+            return;
+          }
+        } else {
+          const hitNode = this.hitTestNode(mx, my);
+          if (hitNode) {
+            this.selectedNodeKey = hitNode.key;
+            this.selectedCountryName = null;
+            this.callbacks.onSelectNode?.(hitNode);
+            return;
+          }
         }
         const ll = this.screenToLonLat(mx, my);
         const hitCountry = ll ? findCountryAt(this.features, ll[0], ll[1]) : null;

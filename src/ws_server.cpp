@@ -400,6 +400,7 @@ void WsServer::handleHttpOrWs(uintptr_t rawSock) {
 
   std::string upgradeHeader;
   std::string wsKey;
+  size_t contentLength = 0;
   std::string line;
   std::getline(iss, line); // consume remainder of request line
   while (std::getline(iss, line)) {
@@ -409,6 +410,10 @@ void WsServer::handleHttpOrWs(uintptr_t rawSock) {
     std::string v = trimAscii(line.substr(colon + 1));
     if (k == "upgrade") upgradeHeader = toLowerAscii(v);
     if (k == "sec-websocket-key") wsKey = v;
+    if (k == "content-length") {
+      long long cl = std::atoll(v.c_str());
+      if (cl > 0 && cl <= 16384) contentLength = static_cast<size_t>(cl);
+    }
   }
 
   if (upgradeHeader == "websocket" && !wsKey.empty()) {
@@ -450,14 +455,23 @@ void WsServer::handleHttpOrWs(uintptr_t rawSock) {
   }
 
   if (path.rfind("/api/", 0) == 0 && path != "/api/health" && path != "/api/snapshot") {
+    std::string body = req.substr(hdrEnd + 4);
+    while (body.size() < contentLength) {
+      int n = recv(s, buf, sizeof(buf), 0);
+      if (n <= 0) break;
+      body.append(buf, static_cast<size_t>(n));
+    }
+    if (body.size() > contentLength) body.resize(contentLength);
+
     if (onApi_) {
-      auto [code, body] = onApi_(method, path);
+      auto [code, respBody] = onApi_(method, path, body);
       const char* status = (code == 200) ? "200 OK"
+                         : (code == 201) ? "201 Created"
                          : (code == 202) ? "202 Accepted"
                          : (code == 400) ? "400 Bad Request"
                          : (code == 409) ? "409 Conflict"
                                          : "404 Not Found";
-      sendSimpleResponse(rawSock, status, "application/json; charset=utf-8", body);
+      sendSimpleResponse(rawSock, status, "application/json; charset=utf-8", respBody);
       return;
     }
     sendSimpleResponse(rawSock, "404 Not Found", "application/json; charset=utf-8", "{\"error\":\"not_found\"}");

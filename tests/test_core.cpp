@@ -16,6 +16,7 @@
 #include "../src/net_monitor.hpp"
 #include "../src/serializer.hpp"
 #include "../src/service_monitor.hpp"
+#include "../src/settings_store.hpp"
 #include "../src/updater.hpp"
 #include "../src/ws_server.hpp"
 
@@ -375,6 +376,33 @@ int testMmdbAndHistorySecurity() {
   return 0;
 }
 
+int testSettingsStorePersistence() {
+  std::string k, v;
+  CHECK(SettingsStore::parseLine("defaultView\tglobal\r\n", k, v));
+  CHECK(k == "defaultView" && v == "global");
+  CHECK(!SettingsStore::parseLine("# comment", k, v));
+
+  auto tempPath = std::filesystem::temp_directory_path() / "netpulse_settings_test.tsv";
+  std::error_code ec;
+  std::filesystem::remove(tempPath, ec);
+  {
+    std::ofstream out(tempPath);
+    out << "alertsEnabled\t0\n"
+        << "defaultView\tglobal\n"
+        << "minimizeToTray\t0\n";
+  }
+  SettingsStore store(tempPath);
+  auto cfg = store.get();
+  CHECK(!cfg.alertsEnabled);
+  CHECK(cfg.defaultView == "global");
+  CHECK(!cfg.minimizeToTray);
+  CHECK(store.toJson().find("\"defaultView\":\"global\"") != std::string::npos);
+
+  std::filesystem::remove(tempPath, ec);
+  std::cout << "[PASS] testSettingsStorePersistence\n";
+  return 0;
+}
+
 int main() {
   WSADATA wsa{};
   if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
@@ -387,6 +415,7 @@ int main() {
   rc |= testSemVerAndReleaseParsing();
   rc |= testServiceMonitorParsing();
   rc |= testMmdbAndHistorySecurity();
+  rc |= testSettingsStorePersistence();
 
   WSACleanup();
   if (rc == 0) {

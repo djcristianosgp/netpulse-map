@@ -71,6 +71,8 @@
       </select>
       <button class="ctrl-btn" id="btnPause" title="Pausar/Retomar stream (Espaço)">Pausar</button>
       <button class="ctrl-btn" id="btnReset" title="Mostrar planeta inteiro (R)">Planeta</button>
+      <button class="ctrl-btn" id="btnSettings" title="Configurações da aplicação">⚙</button>
+      <button class="ctrl-btn" id="btnMinimizeTray" title="Minimizar para a bandeja do sistema">🗕</button>
     </div>
   </header>
 
@@ -164,6 +166,60 @@
 
   <!-- Floating Map Tooltip -->
   <div id="mapTooltip" class="map-tooltip glass hidden"></div>
+
+  <!-- Settings Modal -->
+  <div id="settingsModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <div class="modal-card glass">
+      <div class="modal-head">
+        <div>
+          <div class="insp-eyebrow">PREFERÊNCIAS DO APLICATIVO</div>
+          <h2 class="insp-title" id="settingsTitle">Configurações do NetPulse 2D</h2>
+        </div>
+        <button class="close-btn" id="btnCloseSettings" title="Fechar (Esc)">✕</button>
+      </div>
+      <form id="settingsForm" class="modal-body">
+        <label class="setting-row">
+          <div>
+            <div class="setting-name">Notificações na bandeja</div>
+            <div class="setting-desc">Alertar quando um serviço cair, surgir porta sensível ou novo país.</div>
+          </div>
+          <input type="checkbox" id="cfgAlertsEnabled" class="switch-chk" />
+        </label>
+
+        <label class="setting-row">
+          <div>
+            <div class="setting-name">Iniciar com o Windows</div>
+            <div class="setting-desc">Executa automaticamente ao fazer login no usuário atual.</div>
+          </div>
+          <input type="checkbox" id="cfgAutoStart" class="switch-chk" />
+        </label>
+
+        <label class="setting-row">
+          <div>
+            <div class="setting-name">Minimizar para a bandeja</div>
+            <div class="setting-desc">Ao minimizar a janela ou clicar em 🗕, mantém o app oculto junto ao relógio.</div>
+          </div>
+          <input type="checkbox" id="cfgMinimizeToTray" class="switch-chk" />
+        </label>
+
+        <div class="setting-row setting-col">
+          <div class="setting-name">Visão inicial ao abrir</div>
+          <div class="setting-desc">Define qual mapa é carregado automaticamente quando você abre o aplicativo.</div>
+          <select id="cfgDefaultView" class="ctrl-select" style="width:100%;height:34px;margin-top:6px">
+            <option value="local">📍 Minha Conexão (a partir do seu computador)</option>
+            <option value="global">🌍 Global &amp; Serviços (continentes e monitoramento)</option>
+          </select>
+        </div>
+
+        <div id="settingsFeedback" class="item-geo hidden"></div>
+
+        <div class="modal-foot">
+          <button type="button" class="ctrl-btn" id="btnCancelSettings">Cancelar</button>
+          <button type="submit" class="update-apply-btn" style="padding:7px 14px;font-size:12px">Salvar Configurações</button>
+        </div>
+      </form>
+    </div>
+  </div>
 
   <script type="module" src="/app.js"></script>
 </body>

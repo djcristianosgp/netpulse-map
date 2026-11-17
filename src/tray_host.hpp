@@ -21,6 +21,9 @@ void runTrayMessageLoop(const std::string& url,
 
 void requestTrayQuit();
 void showTrayBalloon(const std::string& title, const std::string& body, bool isWarning);
+void setMinimizeToTrayEnabled(bool enabled);
+bool minimizeMapWindowToTray();
+bool focusExistingMapWindow();
 
 // Checks single-instance mutex; if already running, signals existing instance to reopen the map.
 bool acquireSingleInstanceOrFocusExisting(void** outMutexHandle);

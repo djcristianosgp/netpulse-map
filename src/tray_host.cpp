@@ -45,9 +45,11 @@ std::wstring utf8ToWideTruncated(const std::string& s, size_t maxChars) {
 }
 
 constexpr UINT ID_MENU_OPEN_APP = 1001;
+constexpr UINT ID_MENU_MINIMIZE_TRAY = 1005;
 constexpr UINT ID_MENU_OPEN_BROWSER = 1002;
 constexpr UINT ID_MENU_CHECK_UPDATE = 1003;
 constexpr UINT ID_MENU_QUIT = 1004;
+constexpr UINT_PTR ID_TIMER_MINIMIZE_WATCH = 2001;
 
 struct TrayState {
   TrayCallbacks callbacks;
@@ -58,6 +60,46 @@ struct TrayState {
 };
 
 std::atomic<HWND> gTrayHwnd{nullptr};
+std::atomic<bool> gMinimizeToTray{true};
+
+HWND findMapBrowserWindow(bool onlyVisible) {
+  struct SearchCtx {
+    bool onlyVisible;
+    HWND found = nullptr;
+  } ctx{onlyVisible, nullptr};
+
+  EnumWindows(
+      [](HWND hwnd, LPARAM lParam) -> BOOL {
+        auto* c = reinterpret_cast<SearchCtx*>(lParam);
+        if (c->onlyVisible && !IsWindowVisible(hwnd)) return TRUE;
+        wchar_t title[256] = {};
+        if (GetWindowTextW(hwnd, title, static_cast<int>(std::size(title))) <= 0) return TRUE;
+        if (wcsncmp(title, L"NetPulse 2D", 11) != 0) return TRUE;
+
+        DWORD pid = 0;
+        GetWindowThreadProcessId(hwnd, &pid);
+        HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (!hProc) return TRUE;
+        wchar_t exe[MAX_PATH] = {};
+        DWORD sz = static_cast<DWORD>(std::size(exe));
+        bool isBrowser = false;
+        if (QueryFullProcessImageNameW(hProc, 0, exe, &sz)) {
+          std::wstring p(exe, sz);
+          for (auto& ch : p) ch = static_cast<wchar_t>(towlower(ch));
+          isBrowser = (p.find(L"msedge.exe") != std::wstring::npos ||
+                       p.find(L"chrome.exe") != std::wstring::npos);
+        }
+        CloseHandle(hProc);
+        if (isBrowser) {
+          c->found = hwnd;
+          return FALSE;
+        }
+        return TRUE;
+      },
+      reinterpret_cast<LPARAM>(&ctx));
+
+  return ctx.found;
+}
 
 void addTrayIcon(TrayState* st) {
   if (!st || !st->nid.hWnd) return;
@@ -79,7 +121,10 @@ void showContextMenu(HWND hwnd, TrayState* st) {
   HMENU menu = CreatePopupMenu();
   if (!menu) return;
 
-  AppendMenuW(menu, MF_STRING, ID_MENU_OPEN_APP, L"Abrir Mapa 2D");
+  AppendMenuW(menu, MF_STRING, ID_MENU_OPEN_APP, L"Abrir / Restaurar Mapa 2D");
+  if (findMapBrowserWindow(true)) {
+    AppendMenuW(menu, MF_STRING, ID_MENU_MINIMIZE_TRAY, L"Minimizar para a Bandeja");
+  }
   AppendMenuW(menu, MF_STRING, ID_MENU_OPEN_BROWSER, L"Abrir no Navegador");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, ID_MENU_CHECK_UPDATE, L"Verificar Atualizações");
@@ -95,6 +140,8 @@ void showContextMenu(HWND hwnd, TrayState* st) {
 
   if (cmd == ID_MENU_OPEN_APP && st->callbacks.onOpenApp) {
     st->callbacks.onOpenApp();
+  } else if (cmd == ID_MENU_MINIMIZE_TRAY) {
+    minimizeMapWindowToTray();
   } else if (cmd == ID_MENU_OPEN_BROWSER && st->callbacks.onOpenBrowser) {
     st->callbacks.onOpenBrowser();
   } else if (cmd == ID_MENU_CHECK_UPDATE && st->callbacks.onCheckUpdates) {
@@ -139,12 +186,22 @@ LRESULT CALLBACK trayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
       }
       return 0;
 
+    case WM_TIMER:
+      if (wParam == ID_TIMER_MINIMIZE_WATCH && gMinimizeToTray.load()) {
+        HWND mapWin = findMapBrowserWindow(true);
+        if (mapWin && IsIconic(mapWin)) {
+          ShowWindow(mapWin, SW_HIDE);
+        }
+      }
+      return 0;
+
     case WM_CLOSE:
       if (st && st->runningFlag) st->runningFlag->store(false);
       DestroyWindow(hwnd);
       return 0;
 
     case WM_DESTROY:
+      KillTimer(hwnd, ID_TIMER_MINIMIZE_WATCH);
       if (st) removeTrayIcon(st);
       gTrayHwnd.store(nullptr);
       PostQuitMessage(0);
@@ -185,6 +242,30 @@ void requestTrayQuit() {
   if (hwnd) {
     PostMessageW(hwnd, WM_CLOSE, 0, 0);
   }
+}
+
+void setMinimizeToTrayEnabled(bool enabled) {
+  gMinimizeToTray.store(enabled);
+}
+
+bool focusExistingMapWindow() {
+  HWND found = findMapBrowserWindow(false);
+  if (!found) return false;
+  if (!IsWindowVisible(found)) {
+    ShowWindow(found, SW_SHOW);
+  }
+  if (IsIconic(found)) {
+    ShowWindow(found, SW_RESTORE);
+  }
+  SetForegroundWindow(found);
+  return true;
+}
+
+bool minimizeMapWindowToTray() {
+  HWND found = findMapBrowserWindow(true);
+  if (!found) return false;
+  ShowWindow(found, SW_HIDE);
+  return true;
 }
 
 void showTrayBalloon(const std::string& title, const std::string& body, bool isWarning) {
@@ -239,6 +320,7 @@ void runTrayMessageLoop(const std::string& /*url*/,
   }
   wcscpy_s(state.nid.szTip, L"NetPulse 2D — Mapa de Conexões");
   addTrayIcon(&state);
+  SetTimer(hwnd, ID_TIMER_MINIMIZE_WATCH, 350, nullptr);
 
   MSG msg;
   while (GetMessageW(&msg, nullptr, 0, 0) > 0) {

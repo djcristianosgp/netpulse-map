@@ -15,6 +15,7 @@
 #include "net_monitor.hpp"
 #include "serializer.hpp"
 #include "service_monitor.hpp"
+#include "settings_store.hpp"
 #include "traceroute.hpp"
 #include "tray_host.hpp"
 #include "updater.hpp"
@@ -96,47 +97,8 @@ std::filesystem::path resolveDataDir(const std::filesystem::path& rootDir) {
   return localData;
 }
 
-bool focusExistingMapWindow() {
-  HWND found = nullptr;
-  EnumWindows(
-      [](HWND hwnd, LPARAM lParam) -> BOOL {
-        if (!IsWindowVisible(hwnd)) return TRUE;
-        wchar_t title[256] = {};
-        if (GetWindowTextW(hwnd, title, static_cast<int>(std::size(title))) <= 0) return TRUE;
-        if (wcsncmp(title, L"NetPulse 2D", 11) != 0) return TRUE;
-
-        DWORD pid = 0;
-        GetWindowThreadProcessId(hwnd, &pid);
-        HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-        if (!hProc) return TRUE;
-        wchar_t exe[MAX_PATH] = {};
-        DWORD sz = static_cast<DWORD>(std::size(exe));
-        bool isBrowser = false;
-        if (QueryFullProcessImageNameW(hProc, 0, exe, &sz)) {
-          std::wstring p(exe, sz);
-          for (auto& ch : p) ch = static_cast<wchar_t>(towlower(ch));
-          isBrowser = (p.find(L"msedge.exe") != std::wstring::npos ||
-                       p.find(L"chrome.exe") != std::wstring::npos);
-        }
-        CloseHandle(hProc);
-        if (isBrowser) {
-          *reinterpret_cast<HWND*>(lParam) = hwnd;
-          return FALSE;
-        }
-        return TRUE;
-      },
-      reinterpret_cast<LPARAM>(&found));
-
-  if (found) {
-    if (IsIconic(found)) ShowWindow(found, SW_RESTORE);
-    SetForegroundWindow(found);
-    return true;
-  }
-  return false;
-}
-
 void launchAppWindow(const std::string& url, bool useAppMode) {
-  if (useAppMode && focusExistingMapWindow()) {
+  if (useAppMode && netpulse::focusExistingMapWindow()) {
     return;
   }
   if (useAppMode) {
@@ -248,7 +210,12 @@ int main(int argc, char** argv) {
   serviceMon.start();
 
   netpulse::TracerouteService tracer(geoDns);
+  netpulse::SettingsStore settingsStore(dataDir / "settings.tsv");
+  const auto initCfg = settingsStore.get();
+  netpulse::setMinimizeToTrayEnabled(initCfg.minimizeToTray);
+
   netpulse::HistoryStore history(dataDir);
+  history.setAlertsEnabled(initCfg.alertsEnabled);
   history.setAlertCallback([](const std::string& title, const std::string& body, bool isWarning) {
     netpulse::showTrayBalloon(title, body, isWarning);
   });
@@ -340,7 +307,40 @@ int main(int argc, char** argv) {
       std::string en = extractSimpleJsonField(body, "enabled");
       bool next = (en == "true" || en == "1");
       history.setAlertsEnabled(next);
+      auto cfg = settingsStore.get();
+      cfg.alertsEnabled = next;
+      std::string err;
+      settingsStore.update(cfg, err);
       return {200, std::string("{\"alertsEnabled\":") + (next ? "true" : "false") + "}"};
+    }
+    if (path == "/api/settings" && method == "GET") {
+      return {200, settingsStore.toJson()};
+    }
+    if (path == "/api/settings" && method == "POST") {
+      auto nextCfg = settingsStore.get();
+      std::string sAlerts = extractSimpleJsonField(body, "alertsEnabled");
+      if (!sAlerts.empty()) nextCfg.alertsEnabled = (sAlerts == "true" || sAlerts == "1");
+      std::string sAuto = extractSimpleJsonField(body, "autoStart");
+      if (!sAuto.empty()) nextCfg.autoStart = (sAuto == "true" || sAuto == "1");
+      std::string sView = extractSimpleJsonField(body, "defaultView");
+      if (sView == "local" || sView == "global") nextCfg.defaultView = sView;
+      std::string sMin = extractSimpleJsonField(body, "minimizeToTray");
+      if (!sMin.empty()) nextCfg.minimizeToTray = (sMin == "true" || sMin == "1");
+
+      std::string err;
+      if (!settingsStore.update(nextCfg, err)) {
+        std::string resp = "{\"ok\":false,\"error\":";
+        netpulse::appendJsonEscaped(resp, err);
+        resp.push_back('}');
+        return {400, resp};
+      }
+      history.setAlertsEnabled(nextCfg.alertsEnabled);
+      netpulse::setMinimizeToTrayEnabled(nextCfg.minimizeToTray);
+      return {200, settingsStore.toJson()};
+    }
+    if (path == "/api/window/minimize-tray" && method == "POST") {
+      bool ok = netpulse::minimizeMapWindowToTray();
+      return {ok ? 200 : 409, std::string("{\"ok\":") + (ok ? "true" : "false") + "}"};
     }
     if (path == "/api/action/kill-process" && method == "POST") {
       uint32_t pid = static_cast<uint32_t>(std::strtoul(extractSimpleJsonField(body, "pid").c_str(), nullptr, 10));

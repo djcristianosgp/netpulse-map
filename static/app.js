@@ -1165,19 +1165,51 @@ async function init() {
 
   document.querySelectorAll('.view-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
-      const mode = btn.getAttribute('data-view');
-      state.viewMode = mode;
-      document.querySelectorAll('.view-btn').forEach((b) => b.classList.toggle('active', b === btn));
-      const isGlobal = mode === 'global';
-      $('localTabs').classList.toggle('hidden', isGlobal);
-      $('localFilterChips').classList.toggle('hidden', isGlobal);
-      $('globalTabs').classList.toggle('hidden', !isGlobal);
-      $('globalActions').classList.toggle('hidden', !isGlobal);
-      if (!isGlobal) $('addServiceForm').classList.add('hidden');
-      closeInspector();
-      mapCanvas.setViewMode(mode);
-      applyAndRender();
+      switchViewMode(btn.getAttribute('data-view'));
     });
+  });
+
+  $('btnSettings').addEventListener('click', openSettingsModal);
+  $('btnCloseSettings').addEventListener('click', closeSettingsModal);
+  $('btnCancelSettings').addEventListener('click', closeSettingsModal);
+  $('settingsModal').addEventListener('click', (e) => {
+    if (e.target === $('settingsModal')) closeSettingsModal();
+  });
+
+  $('settingsForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fb = $('settingsFeedback');
+    fb.classList.remove('hidden');
+    fb.textContent = 'Salvando configurações...';
+    const payload = {
+      alertsEnabled: $('cfgAlertsEnabled').checked,
+      autoStart: $('cfgAutoStart').checked,
+      minimizeToTray: $('cfgMinimizeToTray').checked,
+      defaultView: $('cfgDefaultView').value,
+    };
+    try {
+      const resp = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        fb.textContent = `Erro: ${data.error || 'falha ao salvar'}`;
+        return;
+      }
+      fb.textContent = 'Configurações salvas!';
+      lastHistoryFetchMs = 0;
+      setTimeout(() => closeSettingsModal(), 450);
+    } catch {
+      fb.textContent = 'Erro de comunicação com o motor local.';
+    }
+  });
+
+  $('btnMinimizeTray').addEventListener('click', async () => {
+    try {
+      await fetch('/api/window/minimize-tray', { method: 'POST' });
+    } catch {}
   });
 
   $('btnProbeServices').addEventListener('click', async () => {
@@ -1254,7 +1286,9 @@ async function init() {
   window.addEventListener('keydown', (e) => {
     const inInput = document.activeElement === $('searchInput');
     if (e.key === 'Escape') {
-      if (inInput) {
+      if (!$('settingsModal').classList.contains('hidden')) {
+        closeSettingsModal();
+      } else if (inInput) {
         $('searchInput').blur();
       } else {
         closeInspector();
@@ -1285,8 +1319,55 @@ async function init() {
     }
   });
 
+  await loadInitialSettings();
   connectWebSocket();
   initUpdateMonitor();
+}
+
+function switchViewMode(mode) {
+  if (mode !== 'local' && mode !== 'global') return;
+  state.viewMode = mode;
+  document.querySelectorAll('.view-btn').forEach((b) => {
+    b.classList.toggle('active', b.getAttribute('data-view') === mode);
+  });
+  const isGlobal = mode === 'global';
+  $('localTabs').classList.toggle('hidden', isGlobal);
+  $('localFilterChips').classList.toggle('hidden', isGlobal);
+  $('globalTabs').classList.toggle('hidden', !isGlobal);
+  $('globalActions').classList.toggle('hidden', !isGlobal);
+  if (!isGlobal) $('addServiceForm').classList.add('hidden');
+  closeInspector();
+  mapCanvas.setViewMode(mode);
+  applyAndRender();
+}
+
+async function loadInitialSettings() {
+  try {
+    const resp = await fetch('/api/settings');
+    if (!resp.ok) return;
+    const cfg = await resp.json();
+    if (cfg.defaultView === 'global' || cfg.defaultView === 'local') {
+      switchViewMode(cfg.defaultView);
+    }
+  } catch {}
+}
+
+async function openSettingsModal() {
+  $('settingsFeedback').classList.add('hidden');
+  $('settingsModal').classList.remove('hidden');
+  try {
+    const resp = await fetch('/api/settings');
+    if (!resp.ok) return;
+    const cfg = await resp.json();
+    $('cfgAlertsEnabled').checked = !!cfg.alertsEnabled;
+    $('cfgAutoStart').checked = !!cfg.autoStart;
+    $('cfgMinimizeToTray').checked = !!cfg.minimizeToTray;
+    $('cfgDefaultView').value = cfg.defaultView === 'global' ? 'global' : 'local';
+  } catch {}
+}
+
+function closeSettingsModal() {
+  $('settingsModal').classList.add('hidden');
 }
 
 let updatePollTimer = null;

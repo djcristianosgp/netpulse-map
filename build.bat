@@ -57,6 +57,7 @@ cl /nologo /std:c++20 /O2 /EHsc /W4 /utf-8 ^
   "%ROOT%src\ws_server.cpp" ^
   "%ROOT%src\updater.cpp" ^
   "%ROOT%src\service_monitor.cpp" ^
+  "%ROOT%src\settings_store.cpp" ^
   "%ROOT%src\mmdb_reader.cpp" ^
   "%ROOT%src\traceroute.cpp" ^
   "%ROOT%src\history_store.cpp" ^
@@ -77,6 +78,7 @@ cl /nologo /std:c++20 /O2 /EHsc /W4 /utf-8 ^
   "%ROOT%src\ws_server.cpp" ^
   "%ROOT%src\updater.cpp" ^
   "%ROOT%src\service_monitor.cpp" ^
+  "%ROOT%src\settings_store.cpp" ^
   "%ROOT%src\mmdb_reader.cpp" ^
   "%ROOT%src\traceroute.cpp" ^
   "%ROOT%src\history_store.cpp" ^

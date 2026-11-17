@@ -1,5 +1,6 @@
 # Build & MSVC artifacts
 build/
+dist/
 out/
 CMakeFiles/
 CMakeCache.txt

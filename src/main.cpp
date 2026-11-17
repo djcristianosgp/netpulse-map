@@ -63,6 +63,32 @@ std::filesystem::path findProjectRoot() {
   return std::filesystem::current_path();
 }
 
+std::filesystem::path resolveDataDir(const std::filesystem::path& rootDir) {
+  std::error_code ec;
+  const auto localData = rootDir / "data";
+  if (std::filesystem::exists(rootDir / "src", ec)) {
+    return localData;
+  }
+  // When installed under Program Files or read-only directory, store runtime cache in %LOCALAPPDATA%.
+  std::filesystem::create_directories(localData, ec);
+  if (!ec) {
+    const auto probe = localData / ".write_probe";
+    HANDLE h = CreateFileW(probe.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+    if (h != INVALID_HANDLE_VALUE) {
+      CloseHandle(h);
+      return localData;
+    }
+  }
+
+  wchar_t appDataBuf[MAX_PATH * 2] = {};
+  DWORD len = GetEnvironmentVariableW(L"LOCALAPPDATA", appDataBuf, static_cast<DWORD>(std::size(appDataBuf)));
+  if (len > 0 && len < std::size(appDataBuf)) {
+    return std::filesystem::path(appDataBuf) / "NetPulse2D" / "data";
+  }
+  return localData;
+}
+
 void launchAppWindow(const std::string& url, bool useAppMode) {
   if (useAppMode) {
     const wchar_t* candidates[] = {
@@ -119,7 +145,7 @@ int main(int argc, char** argv) {
   const std::filesystem::path rootDir = findProjectRoot();
   const std::filesystem::path staticDir = rootDir / "static";
   const std::filesystem::path assetsDir = rootDir / "assets";
-  const std::filesystem::path dataDir = rootDir / "data";
+  const std::filesystem::path dataDir = resolveDataDir(rootDir);
 
   netpulse::GeoDnsService geoDns(dataDir / "geoip_cache.tsv");
   geoDns.start();

@@ -35,6 +35,19 @@ cd tools\netpulse-map
 build\test_core.exe
 ```
 
+## Gerar Instalador e Release Automática por Tag no GitHub
+O workflow [.github/workflows/release.yml](.github/workflows/release.yml) gera automaticamente o instalador **Inno Setup 6** (`NetPulse2D-Setup-x64.exe`), o pacote portátil (`NetPulse2D-Portable-x64.zip`) e os hashes (`checksums.txt`) em **GitHub Releases** sempre que uma tag `v*` é enviada:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+Para gerar o pacote localmente via PowerShell (com Inno Setup 6 instalado):
+```powershell
+.\packaging\build-installer.ps1 -Version "1.0.0"
+```
+
 ## Interações com o Mapa 2D
 - **Planeta Completo**: visualiza todos os continentes e 177 países (`assets/countries-110m.json` offline) em 3 projeções alternáveis (**Natural Earth**, **Equirectangular**, **Mercator**).
 - **Pan & Zoom**: arraste com o mouse para mover; role a roda do mouse para zoom centrado no cursor; duplo clique para aproximar; `R` ou botão **Planeta** para reajustar o planeta inteiro.

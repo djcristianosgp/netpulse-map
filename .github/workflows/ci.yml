@@ -1,0 +1,31 @@
+name: NetPulse 2D - CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-and-test:
+    name: Build C++20 & Run Native Tests
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC x64 toolchain
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build C++20 binaries
+        run: .\build.bat
+
+      - name: Run C++ native test suite
+        run: .\build\test_core.exe
+
+      - name: Verify frontend JS syntax
+        run: |
+          node --check static/topo.js
+          node --check static/map-canvas.js
+          node --check static/app.js

@@ -379,6 +379,9 @@ int main(int argc, char** argv) {
 
   std::mutex latestSnapCopyMutex;
   std::string latestSnapCopy;
+  netpulse::TelemetrySnapshot latestTelemetryCopy;
+  char localHostBuf[256] = {};
+  std::string localHostnameStr = (gethostname(localHostBuf, sizeof(localHostBuf)) == 0) ? localHostBuf : "";
 
   netpulse::ApiRouter apiRouter(netpulse::ApiDependencies{
       auth,
@@ -410,6 +413,20 @@ int main(int argc, char** argv) {
       &qualityEngine,
       &ifaceMonitor,
       &discoveryEngine,
+      [&]() {
+        netpulse::TelemetrySnapshot telCopy;
+        {
+          std::lock_guard lock(latestSnapCopyMutex);
+          telCopy = latestTelemetryCopy;
+        }
+        auto topo = netpulse::buildLanTopology(nowMs(),
+                                               localHostnameStr,
+                                               ifaceMonitor.getSnapshot(),
+                                               discoveryEngine.getDevicesSnapshot(),
+                                               qualityEngine.getTargetsSnapshot(),
+                                               &telCopy);
+        return netpulse::serializeLanTopologyJson(topo);
+      },
   });
 
   const uint64_t startMs = nowMs();
@@ -533,6 +550,10 @@ int main(int argc, char** argv) {
 
       history.processTelemetry(snap, geoDns);
       history.processServices(serviceMon.getSnapshot());
+      {
+        std::lock_guard lock(latestSnapCopyMutex);
+        latestTelemetryCopy = snap;
+      }
 
       const size_t clients = server.clientCount();
       if (clients > 0 || (tickStart - lastIdleSerializeMs) >= 1500) {

@@ -84,6 +84,10 @@ public:
 
   // Collects current interface inventory + calculates per-interface rates + periodically persists SQLite samples.
   InterfaceInventorySnapshot collect(uint64_t nowMs);
+  InterfaceInventorySnapshot getSnapshot() const {
+    std::lock_guard lock(mutex_);
+    return lastSnapshot_;
+  }
   std::string getSnapshotJson() const;
 
 private:

@@ -1,5 +1,6 @@
 import { decodeTopoJson } from './topo.js';
 import { PlanetMapCanvas } from './map-canvas.js';
+import { LanTopologyCanvas } from './lan-topo.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -83,6 +84,10 @@ const state = {
   discovery: {
     filter: 'all',
     search: '',
+    timer: null,
+  },
+  lanTopo: {
+    data: null,
     timer: null,
   },
   auth: {
@@ -1480,7 +1485,9 @@ async function init() {
   window.addEventListener('keydown', (e) => {
     const inInput = document.activeElement === $('searchInput');
     if (e.key === 'Escape') {
-      if (!$('discoveryModal').classList.contains('hidden')) {
+      if (!$('topologyModal').classList.contains('hidden')) {
+        closeTopologyModal();
+      } else if (!$('discoveryModal').classList.contains('hidden')) {
         closeDiscoveryModal();
       } else if (!$('interfacesModal').classList.contains('hidden')) {
         closeInterfacesModal();
@@ -1744,6 +1751,16 @@ async function init() {
     });
     setTimeout(loadDiscoveryDevices, 900);
   });
+
+  $('btnLanTopo').addEventListener('click', openTopologyModal);
+  $('btnCloseTopoModal').addEventListener('click', closeTopologyModal);
+  $('topologyModal').addEventListener('click', (e) => {
+    if (e.target === $('topologyModal')) closeTopologyModal();
+  });
+  $('btnTopoRefresh').addEventListener('click', loadLanTopology);
+  $('btnTopoResetView').addEventListener('click', () => lanTopoCanvas.fitView());
+  $('topoFilterSelect').addEventListener('change', applyTopologyView);
+  $('topoSearchInput').addEventListener('input', applyTopologyView);
 
   $('authForm').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -2958,6 +2975,84 @@ async function loadDiscoveryDevices() {
         loadDiscoveryDevices();
       };
     });
+  } catch {}
+}
+
+const lanTopoCanvas = new LanTopologyCanvas($('lanTopoCanvas'), (node, edges) => {
+  renderTopologyInspector(node, edges);
+});
+
+function renderTopologyInspector(node, edges) {
+  const box = $('topoInspector');
+  if (!node) {
+    box.innerHTML = '<div class="sec-row-meta">Clique em qualquer nó do grafo para inspecionar metadados e a evidência técnica de conectividade das arestas.</div>';
+    return;
+  }
+  const edgeHtml = (!edges || edges.length === 0)
+    ? '<div class="sec-row-meta">Sem arestas visíveis no filtro atual.</div>'
+    : edges.map((e) => `
+      <div class="sec-row" style="flex-direction:column;align-items:stretch;gap:2px">
+        <div><strong>${escHtml(e.kind)}</strong> · ${escHtml(e.label || '')}${e.rttMs > 0 ? ` (${Number(e.rttMs).toFixed(1)} ms)` : ''}</div>
+        <div class="sec-row-meta">${escHtml(e.evidence)}</div>
+      </div>`).join('');
+
+  box.innerHTML = `
+    <div style="font-size:13px;font-weight:700;color:#f8fafc">${escHtml(node.label)}</div>
+    <div class="sec-row-meta">${escHtml(node.deviceType || node.kind)} · Status: <strong>${escHtml(node.status)}</strong></div>
+    <div class="sec-list" style="margin:6px 0">
+      ${node.ip ? `<div class="sec-row"><span>IP</span><strong>${escHtml(node.ip)}</strong></div>` : ''}
+      ${node.mac ? `<div class="sec-row"><span>MAC</span><strong>${escHtml(node.mac)}</strong></div>` : ''}
+      ${node.vendor ? `<div class="sec-row"><span>Fabricante</span><strong>${escHtml(node.vendor)}</strong></div>` : ''}
+      ${node.subnet ? `<div class="sec-row"><span>Sub-rede</span><strong>${escHtml(node.subnet)}</strong></div>` : ''}
+      ${node.openPorts ? `<div class="sec-row"><span>Portas</span><strong>${escHtml(node.openPorts)}</strong></div>` : ''}
+      ${node.latencyMs > 0 ? `<div class="sec-row"><span>Latência</span><strong>${Number(node.latencyMs).toFixed(1)} ms</strong></div>` : ''}
+      ${node.activeConns > 0 ? `<div class="sec-row"><span>Sockets Ativos</span><strong>${Number(node.activeConns)}</strong></div>` : ''}
+    </div>
+    <div class="notify-cats-head" style="padding-top:4px"><span>Evidências de Conectividade (${(edges || []).length})</span></div>
+    <div class="sec-list">${edgeHtml}</div>
+  `;
+}
+
+function applyTopologyView() {
+  if (!state.lanTopo.data) return;
+  lanTopoCanvas.setData(
+    state.lanTopo.data,
+    $('topoFilterSelect').value,
+    $('topoSearchInput').value
+  );
+}
+
+function openTopologyModal() {
+  $('topologyModal').classList.remove('hidden');
+  lanTopoCanvas.startAnimation();
+  loadLanTopology().then(() => lanTopoCanvas.fitView());
+  if (state.lanTopo.timer) clearInterval(state.lanTopo.timer);
+  state.lanTopo.timer = setInterval(() => {
+    if (!$('topologyModal').classList.contains('hidden')) {
+      loadLanTopology();
+    }
+  }, 5000);
+}
+
+function closeTopologyModal() {
+  $('topologyModal').classList.add('hidden');
+  lanTopoCanvas.stopAnimation();
+  if (state.lanTopo.timer) {
+    clearInterval(state.lanTopo.timer);
+    state.lanTopo.timer = null;
+  }
+}
+
+async function loadLanTopology() {
+  try {
+    const resp = await apiFetch('/api/topology/lan');
+    if (!resp.ok) return;
+    const d = await resp.json();
+    state.lanTopo.data = d;
+    const s = d.summary || {};
+    $('topoSummaryBar').innerHTML = `<span>Nós: <strong>${Number(s.nodes || 0)}</strong> · Arestas: <strong>${Number(s.edges || 0)}</strong> · Dispositivos Online: <strong>${Number(s.onlineDevices || 0)}/${Number(s.totalDevices || 0)}</strong> · Sockets Ativos: <strong>${Number(s.activeSockets || 0)}</strong></span><span class="sec-row-meta">Arraste para mover · Roda do mouse para zoom</span>`;
+    $('topoModelNote').textContent = d.modelNote || '';
+    applyTopologyView();
   } catch {}
 }
 

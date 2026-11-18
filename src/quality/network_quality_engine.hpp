@@ -108,6 +108,7 @@ public:
 
   std::string getStatusJson() const;
   QualityDiagnosisReport getLatestDiagnosis() const;
+  std::vector<QualityTargetSnapshot> getTargetsSnapshot() const;
 
 private:
   struct TargetState {

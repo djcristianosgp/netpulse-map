@@ -2,6 +2,15 @@
 
 Todas as mudanças relevantes do **NetPulse** serão documentadas neste arquivo.
 
+## [1.9.0] - 2026-11-18 — Fase 6: Mapa de Topologia LAN
+
+### Adicionado
+- Builder determinístico `buildLanTopology` / `serializeLanTopologyJson` (`src/discovery/topology_builder.*`) correlacionando interfaces de rede, gateways/rotas padrão, servidores DNS, dispositivos LAN via ARP/sub-rede, sondagens do Quality Engine e sessões socket TCP/UDP ativas com evidência técnica explícita por aresta (`local_nic`, `default_route`, `dns_config`, `arp_subnet`, `active_socket`).
+- Getters thread-safe de snapshot em `InterfaceMonitor`, `DiscoveryEngine` e `NetworkQualityEngine`.
+- Endpoint `GET /api/topology/lan` (`GET /api/v1/topology/lan`, perfil `Viewer+`).
+- Módulo visual Canvas2D independente `static/lan-topo.js` (`LanTopologyCanvas`) com pan, zoom, layout em camadas hierárquicas + grid escalável para grandes redes `/24`, filtros (`Infra + Ativos`, `Todos Online`, `Todos`), destaque de busca e inspetor lateral de nós/evidências (`#topologyModal` / botão `🕸 Topologia`).
+- Teste `testLanTopologyBuilder` + integração HTTP `/api/v1/topology/lan` em `tests/test_core.cpp`.
+
 ## [1.8.0] - 2026-11-18 — Fase 5: Discovery Engine
 
 ### Adicionado

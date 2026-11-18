@@ -884,6 +884,28 @@ HttpResponse ApiRouter::handleHttp(const HttpRequest& req) {
     return HttpResponse{200, "application/json; charset=utf-8", deps_.discovery->getDevicesJson(), {}};
   }
 
+  // ---- Fase 6: LAN Topology Map ----
+  if (path == "/api/topology/lan" && method == "GET") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Viewer, auth);
+    if (err.statusCode != 200) return err;
+    if (deps_.getLanTopologyJson) {
+      return HttpResponse{200, "application/json; charset=utf-8", deps_.getLanTopologyJson(), {}};
+    }
+    if (!deps_.interfaces || !deps_.discovery) {
+      return jsonError(503, "topology_unavailable");
+    }
+    std::vector<QualityTargetSnapshot> qSnaps;
+    if (deps_.quality) qSnaps = deps_.quality->getTargetsSnapshot();
+    auto topo = buildLanTopology(nowEpochMs(),
+                                 "",
+                                 deps_.interfaces->getSnapshot(),
+                                 deps_.discovery->getDevicesSnapshot(),
+                                 qSnaps,
+                                 nullptr);
+    return HttpResponse{200, "application/json; charset=utf-8", serializeLanTopologyJson(topo), {}};
+  }
+
   if (path == "/api/alerts/toggle" && method == "POST") {
     AuthContext auth;
     auto err = requireAuth(req, Role::Operator, auth, "alerts.toggled");

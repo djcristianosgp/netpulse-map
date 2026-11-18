@@ -40,6 +40,10 @@ public:
 
   bool setDeviceLabel(const std::string& deviceKey, const std::string& label);
   bool removeDevice(const std::string& deviceKey);
+  std::vector<LanDeviceRecord> getDevicesSnapshot() const {
+    std::lock_guard lock(mutex_);
+    return devices_;
+  }
   std::string getDevicesJson() const;
 
 private:

@@ -1312,16 +1312,18 @@ void NetworkQualityEngine::workerLoop(std::stop_token st) {
 }
 
 QualityDiagnosisReport NetworkQualityEngine::getLatestDiagnosis() const {
+  return diagnoseNetworkQuality(getTargetsSnapshot());
+}
+
+std::vector<QualityTargetSnapshot> NetworkQualityEngine::getTargetsSnapshot() const {
   std::vector<QualityTargetSnapshot> snaps;
-  {
-    std::lock_guard lock(mutex_);
-    snaps.reserve(targetOrder_.size());
-    for (const auto& id : targetOrder_) {
-      auto it = targets_.find(id);
-      if (it != targets_.end()) snaps.push_back(it->second.snapshot);
-    }
+  std::lock_guard lock(mutex_);
+  snaps.reserve(targetOrder_.size());
+  for (const auto& id : targetOrder_) {
+    auto it = targets_.find(id);
+    if (it != targets_.end()) snaps.push_back(it->second.snapshot);
   }
-  return diagnoseNetworkQuality(snaps);
+  return snaps;
 }
 
 std::string NetworkQualityEngine::getStatusJson() const {

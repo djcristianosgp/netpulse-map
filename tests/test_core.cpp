@@ -22,6 +22,7 @@ inline int closesocket(int s) { return ::close(s); }
 #include "../src/api/api_router.hpp"
 #include "../src/core/json_lite.hpp"
 #include "../src/discovery/discovery_engine.hpp"
+#include "../src/discovery/topology_builder.hpp"
 #include "../src/geo_dns.hpp"
 #include "../src/history_store.hpp"
 #include "../src/mmdb_reader.hpp"
@@ -683,6 +684,16 @@ int testLiveSecurityHttpAndWsIntegration() {
           "\r\nX-CSRF-Token: " + admCsrf +
           "\r\nContent-Length: " + std::to_string(discDelNoConf.size()) + "\r\n\r\n" + discDelNoConf);
   CHECK(discDelResp.find("confirmation_required") != std::string::npos);
+
+  // 17. Fase 6 LAN Topology Graph endpoint
+  std::string topoResp = sendRawHttp(
+      port,
+      "GET /api/v1/topology/lan HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nAuthorization: Bearer np_adm_integration_secret_987654\r\n\r\n");
+  CHECK(topoResp.find("200 OK") != std::string::npos);
+  CHECK(topoResp.find("\"nodes\":") != std::string::npos);
+  CHECK(topoResp.find("\"edges\":") != std::string::npos);
+  CHECK(topoResp.find("\"modelNote\":") != std::string::npos);
 
   server.stop();
   std::filesystem::remove_all(tempRoot, ec);
@@ -1599,6 +1610,122 @@ int testDiscoveryEngineAndOui() {
   return 0;
 }
 
+int testLanTopologyBuilder() {
+  InterfaceInventorySnapshot ifSnap;
+  ifSnap.primaryIfId = "if-1";
+  ifSnap.primaryIfName = "Ethernet0";
+  ifSnap.primaryGateway = "192.168.10.1";
+  ifSnap.totalRxBps = 50000.0;
+  ifSnap.totalTxBps = 12000.0;
+
+  NetworkInterfaceInfo eth;
+  eth.id = "if-1";
+  eth.ifIndex = 1;
+  eth.name = "Ethernet0";
+  eth.description = "Intel PCIe GbE";
+  eth.type = "ethernet";
+  eth.operStatus = "up";
+  eth.hardwareInterface = true;
+  eth.isDefaultRoute = true;
+  eth.isWanCandidate = true;
+  eth.linkSpeedBps = 1000000000ULL;
+  eth.ipv4 = {"192.168.10.25"};
+  eth.gateways = {"192.168.10.1"};
+  eth.dnsServers = {"1.1.1.1"};
+  eth.rxBps = 50000.0;
+  eth.txBps = 12000.0;
+
+  NetworkInterfaceInfo lo;
+  lo.id = "if-2";
+  lo.ifIndex = 2;
+  lo.name = "Loopback";
+  lo.type = "loopback";
+  lo.operStatus = "up";
+  ifSnap.interfaces = {eth, lo};
+
+  LanDeviceRecord gwDev;
+  gwDev.deviceKey = "B8:69:F4:01:02:03";
+  gwDev.ip = "192.168.10.1";
+  gwDev.mac = "B8:69:F4:01:02:03";
+  gwDev.vendor = "MikroTik";
+  gwDev.deviceType = "Roteador / Gateway";
+  gwDev.interfaceName = "Ethernet0";
+  gwDev.subnet = "192.168.10.0/24";
+  gwDev.isGateway = true;
+  gwDev.online = true;
+  gwDev.openPorts = "53,80";
+
+  LanDeviceRecord nasDev;
+  nasDev.deviceKey = "00:11:32:AA:BB:CC";
+  nasDev.ip = "192.168.10.50";
+  nasDev.mac = "00:11:32:AA:BB:CC";
+  nasDev.vendor = "Synology";
+  nasDev.hostname = "nas-matriz";
+  nasDev.deviceType = "Servidor / NAS";
+  nasDev.interfaceName = "Ethernet0";
+  nasDev.subnet = "192.168.10.0/24";
+  nasDev.online = true;
+  nasDev.latencyMs = 1.4;
+  nasDev.openPorts = "22,445";
+
+  QualityTargetSnapshot qDns;
+  qDns.target.host = "1.1.1.1";
+  qDns.status = "ok";
+  qDns.metrics.okCount = 5;
+  qDns.metrics.p50Ms = 14.2;
+  qDns.metrics.avgDnsMs = 13.5;
+
+  TelemetrySnapshot tel;
+  tel.totalConnections = 12;
+  tel.publicConnections = 10;
+  SocketEntry sock;
+  sock.key = "TCP:50001:192.168.10.50:445:1234";
+  sock.protocol = "TCP";
+  sock.localIp = "192.168.10.25";
+  sock.remoteIp = "192.168.10.50";
+  sock.remotePort = 445;
+  sock.processName = "explorer.exe";
+  sock.scope = IpScope::Lan;
+  tel.connections = {sock};
+
+  auto topo = buildLanTopology(1700000000000ULL, "WORKSTATION-01", ifSnap, {gwDev, nasDev}, {qDns}, &tel);
+  CHECK(topo.totalDevices == 1);
+  CHECK(topo.onlineDevices == 1);
+  CHECK(topo.activeSockets == 12);
+
+  std::unordered_set<std::string> nodeIds;
+  for (const auto& n : topo.nodes) nodeIds.insert(n.id);
+  CHECK(nodeIds.count("host:local") == 1);
+  CHECK(nodeIds.count("iface:if-1") == 1);
+  CHECK(nodeIds.count("iface:if-2") == 0); // loopback excluded
+  CHECK(nodeIds.count("gw:192.168.10.1") == 1);
+  CHECK(nodeIds.count("dns:1.1.1.1") == 1);
+  CHECK(nodeIds.count("upstream:internet") == 1);
+  CHECK(nodeIds.count("dev:00:11:32:AA:BB:CC") == 1);
+
+  bool hasDefaultRoute = false, hasArpSubnet = false, hasActiveSocket = false, hasDnsEdge = false;
+  for (const auto& e : topo.edges) {
+    CHECK(nodeIds.count(e.source) == 1);
+    CHECK(nodeIds.count(e.target) == 1);
+    CHECK(!e.evidence.empty());
+    if (e.kind == "default_route") hasDefaultRoute = true;
+    if (e.kind == "arp_subnet") hasArpSubnet = true;
+    if (e.kind == "active_socket" && e.target == "dev:00:11:32:AA:BB:CC") hasActiveSocket = true;
+    if (e.kind == "dns_config") hasDnsEdge = true;
+  }
+  CHECK(hasDefaultRoute && hasArpSubnet && hasActiveSocket && hasDnsEdge);
+
+  const std::string topoJson = serializeLanTopologyJson(topo);
+  JsonValue parsed;
+  std::string jerr;
+  CHECK(JsonValue::parse(topoJson, parsed, jerr));
+  CHECK(topoJson.find("nas-matriz") != std::string::npos);
+  CHECK(topoJson.find("explorer.exe") != std::string::npos);
+
+  std::cout << "[PASS] testLanTopologyBuilder\n";
+  return 0;
+}
+
 int main() {
 #ifdef _WIN32
   WSADATA wsa{};
@@ -1624,6 +1751,7 @@ int main() {
   rc |= testTracerouteHistoryAndRouteDiff();
   rc |= testMultiWanAndInterfaces();
   rc |= testDiscoveryEngineAndOui();
+  rc |= testLanTopologyBuilder();
 
 #ifdef _WIN32
   WSACleanup();

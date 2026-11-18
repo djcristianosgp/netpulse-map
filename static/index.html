@@ -75,6 +75,7 @@
       <button class="ctrl-btn" id="btnTraceModal" title="Traceroute Avançado, Histórico de Rotas &amp; Diff">🧭 Rotas</button>
       <button class="ctrl-btn" id="btnInterfaces" title="Multi-WAN &amp; Interfaces de Rede">🔌 Interfaces</button>
       <button class="ctrl-btn" id="btnDiscovery" title="Descoberta LAN, MAC &amp; Fabricantes (OUI)">🛰 Dispositivos</button>
+      <button class="ctrl-btn" id="btnLanTopo" title="Mapa de Topologia LAN Interativo">🕸 Topologia</button>
       <button class="ctrl-btn" id="btnAnalytics" title="Histórico &amp; Analytics SQLite">📊 Analytics</button>
       <button class="ctrl-btn" id="btnSecurity" title="Segurança, Tokens & Auditoria">🛡 <span id="authRoleBadge">...</span></button>
       <button class="ctrl-btn" id="btnSettings" title="Configurações da aplicação">⚙</button>
@@ -636,6 +637,39 @@
         </div>
 
         <div id="discDevicesList" class="sec-list" style="max-height:430px"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- LAN Topology Graph Modal -->
+  <div id="topologyModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="topoModalTitle">
+    <div class="modal-card modal-card-xl glass">
+      <div class="modal-head">
+        <div>
+          <div class="insp-eyebrow">TOPOLOGIA LAN · GRAFO INDEPENDENTE COM EVIDÊNCIA TÉCNICA (ROTAS · ARP · SOCKETS · DNS)</div>
+          <h2 class="insp-title" id="topoModalTitle">Mapa de Topologia da Infraestrutura Local</h2>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <select id="topoFilterSelect" class="ctrl-select" style="height:28px">
+            <option value="active_infra" selected>Infra + Ativos</option>
+            <option value="online">Todos Online</option>
+            <option value="all">Todos (Incl. Offline)</option>
+          </select>
+          <input id="topoSearchInput" type="search" placeholder="Destacar IP, MAC, nome..." style="width:165px;height:28px;border-radius:7px;border:1px solid rgba(148,163,184,0.22);background:rgba(15,23,42,0.8);color:var(--text-main);padding:0 8px;font-size:12px" />
+          <button type="button" class="ctrl-btn" id="btnTopoResetView" style="height:28px">⌖ Centralizar</button>
+          <button type="button" class="ctrl-btn" id="btnTopoRefresh" style="height:28px">↻ Atualizar</button>
+          <button class="close-btn" id="btnCloseTopoModal" title="Fechar (Esc)">✕</button>
+        </div>
+      </div>
+      <div class="modal-body" style="max-height:82vh;overflow-y:auto">
+        <div id="topoSummaryBar" class="bw-banner" style="margin-bottom:0">Carregando topologia local...</div>
+        <div class="topo-split">
+          <canvas id="lanTopoCanvas" width="900" height="470" class="lan-topo-canvas"></canvas>
+          <div id="topoInspector" class="notify-group topo-inspector">
+            <div class="sec-row-meta">Clique em qualquer nó do grafo para inspecionar IP, MAC, fabricante, portas e evidência técnica das arestas.</div>
+          </div>
+        </div>
+        <div id="topoModelNote" class="sec-row-meta" style="padding:2px 4px"></div>
       </div>
     </div>
   </div>

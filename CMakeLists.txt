@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(netpulse VERSION 1.8.0 LANGUAGES C CXX)
+project(netpulse VERSION 1.9.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -29,6 +29,7 @@ set(NETPULSE_CORE_SOURCES
   src/quality/network_quality_engine.cpp
   src/network/interface_monitor.cpp
   src/discovery/discovery_engine.cpp
+  src/discovery/topology_builder.cpp
   src/actions.cpp
   src/tray_host.cpp
 )

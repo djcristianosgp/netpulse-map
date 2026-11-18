@@ -2,6 +2,7 @@
 
 #include "../core/json_lite.hpp"
 #include "../discovery/discovery_engine.hpp"
+#include "../discovery/topology_builder.hpp"
 #include "../history_store.hpp"
 #include "../network/interface_monitor.hpp"
 #include "../quality/network_quality_engine.hpp"
@@ -47,6 +48,7 @@ struct ApiDependencies {
   NetworkQualityEngine* quality = nullptr;
   InterfaceMonitor* interfaces = nullptr;
   DiscoveryEngine* discovery = nullptr;
+  std::function<std::string()> getLanTopologyJson = nullptr;
 };
 
 class ApiRouter {

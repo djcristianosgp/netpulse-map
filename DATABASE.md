@@ -83,6 +83,12 @@ Persistência de execuções de traceroute avançado e monitoramento periódico 
 - `trace_monitors`: `target_ip`, `label`, `interval_sec` (`30..3600`), `enabled`, `created_at_ms`, `last_run_ms`.
 - Retenção automática remove `trace_runs WHERE started_at_ms < cutoff` e limpa `trace_hops` órfãos.
 
+### `interface_samples` (Migration v4)
+Amostragem periódica por interface de rede (`Multi-WAN` e inventário físico/VPN/virtual):
+- `id`, `ts_ms`, `if_id`, `if_name`, `if_type`, `oper_status`, `is_default_route`, `link_speed_bps`, `rx_bps`, `tx_bps`, `rx_bytes`, `tx_bytes`, `rx_errors`, `tx_errors`
+- Índices: `idx_iface_id_ts(if_id, ts_ms DESC)` e `idx_iface_ts(ts_ms DESC)`.
+- Limpeza automática em `applyRetentionLocked()` (`WHERE ts_ms < cutoff`) e controle `maxDbSizeMb`.
+
 ---
 
 ## 4. Pipeline Assíncrono & Política de Retenção (`src/history_store.*`)

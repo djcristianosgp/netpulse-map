@@ -155,6 +155,10 @@ std::string formatMacAddress(const uint8_t* bytes, size_t len) {
 }
 
 void computeInterfaceRates(InterfaceRatePrev& prev, NetworkInterfaceInfo& cur, uint64_t nowMs) {
+  cur.rxBps = 0.0;
+  cur.txBps = 0.0;
+  cur.rxPps = 0.0;
+  cur.txPps = 0.0;
   if (prev.tsMs > 0 && nowMs > prev.tsMs) {
     const double dtSec = static_cast<double>(nowMs - prev.tsMs) / 1000.0;
     if (dtSec > 0.05) {
@@ -430,7 +434,12 @@ InterfaceInventorySnapshot InterfaceMonitor::collectOsRaw(uint64_t nowMs) {
     if (info.isDefaultRoute) {
       snap.primaryIfId = info.id;
       snap.primaryIfName = info.name;
-      if (!info.gateways.empty()) snap.primaryGateway = info.gateways.front();
+      if (!info.gateways.empty()) {
+        auto v4It = std::find_if(info.gateways.begin(), info.gateways.end(), [](const std::string& g) {
+          return g.find(':') == std::string::npos;
+        });
+        snap.primaryGateway = (v4It != info.gateways.end()) ? *v4It : info.gateways.front();
+      }
     }
     if (info.isWanCandidate) {
       snap.wanCount++;

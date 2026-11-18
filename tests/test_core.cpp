@@ -1427,14 +1427,14 @@ int testMultiWanAndInterfaces() {
   s1.primaryIfId = "if-1";
   s1.primaryIfName = "Ethernet WAN1";
   s1.primaryGateway = "192.168.1.1";
-  s1.interfaces.push_back({"if-1", 1, "Ethernet WAN1", "", "ethernet", "", "up", true, true, true, true});
-  s1.interfaces.push_back({"if-2", 2, "LTE Failover", "", "ethernet", "", "down", false, true, false, true});
+  s1.interfaces.push_back({1, "if-1", "Ethernet WAN1", "", "ethernet", "", "up", true, true, true, true});
+  s1.interfaces.push_back({2, "if-2", "LTE Failover", "", "ethernet", "", "down", false, true, false, true});
 
   s2.primaryIfId = "if-2";
   s2.primaryIfName = "LTE Failover";
   s2.primaryGateway = "10.0.0.1";
-  s2.interfaces.push_back({"if-1", 1, "Ethernet WAN1", "", "ethernet", "", "down", false, true, false, true});
-  s2.interfaces.push_back({"if-2", 2, "LTE Failover", "", "ethernet", "", "up", true, true, true, true});
+  s2.interfaces.push_back({1, "if-1", "Ethernet WAN1", "", "ethernet", "", "down", false, true, false, true});
+  s2.interfaces.push_back({2, "if-2", "LTE Failover", "", "ethernet", "", "up", true, true, true, true});
 
   auto events = detectMultiWanTransitions(s1, s2);
   auto hasKind = [&](const std::string& k) {
@@ -1465,19 +1465,19 @@ int testMultiWanAndInterfaces() {
 
     // Enqueue aged (20d old) and recent sample for retention validation
     hist.enqueueInterfaceSamples({
-        {nowMs - 20ULL * 86400000ULL, "test-eth", "eth0", "ethernet", "up", true, 1000000000ULL, 1000.0, 500.0, 1000, 500, 0, 0},
-        {nowMs - 5000ULL, "test-eth", "eth0", "ethernet", "up", true, 1000000000ULL, 2000.0, 1000.0, 3000, 1500, 1, 0},
+        {nowMs - 20ULL * 86400000ULL, "test-eth", "eth0", "ethernet", "up", true, 1000000000ULL, 1234.0, 567.0, 1000, 500, 0, 0},
+        {nowMs - 5000ULL, "test-eth", "eth0", "ethernet", "up", true, 1000000000ULL, 2345.0, 890.0, 3000, 1500, 1, 0},
     });
     hist.flushNow();
 
     std::string hJson = hist.queryInterfaceHistoryJson("test-eth", "1h");
-    CHECK(hJson.find("2000.0") != std::string::npos);
+    CHECK(hJson.find("2345.0") != std::string::npos);
 
     hist.setRetentionConfig(7, 128);
     CHECK(hist.pruneNow());
     std::string allAfter = hist.queryInterfaceHistoryJson("test-eth", "30d");
-    CHECK(allAfter.find("1000.0") == std::string::npos);
-    CHECK(allAfter.find("2000.0") != std::string::npos);
+    CHECK(allAfter.find("1234.0") == std::string::npos);
+    CHECK(allAfter.find("2345.0") != std::string::npos);
     hist.stop();
   }
   std::filesystem::remove_all(ifDir, ec);

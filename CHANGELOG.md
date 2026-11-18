@@ -2,6 +2,16 @@
 
 Todas as mudanças relevantes do **NetPulse** serão documentadas neste arquivo.
 
+## [1.7.0] - 2026-11-18 — Fase 4: Multi-WAN e Interfaces de Rede
+
+### Adicionado
+- Módulo `InterfaceMonitor` (`src/network/interface_monitor.*`) com inventário completo Ethernet/Wi-Fi/VPN/Virtual/Tunnel/Loopback (`GetAdaptersAddresses` + `GetIfTable2` + `GetBestInterface` no Windows; `/proc/net/dev` + `getifaddrs` + `/proc/net/route` + `/sys/class/net` no Linux).
+- Métricas individuais por interface (`rxBps`, `txBps`, `rxPps`, `txPps`, `rxBytes`, `txBytes`, `rxErrors`, `txErrors`, `rxDiscards`, `txDiscards`, link speed, MTU, MAC, IPv4/IPv6, gateways, DNS) e detecção de transições Multi-WAN (`wan_primary_changed`, `interface_down`, `interface_up`).
+- Migration v4 no SQLite (`interface_samples`) com gravação em lote a cada 10s e consulta histórica (`15m`, `1h`, `24h`, `7d`) em `HistoryStore`.
+- Endpoints `GET /api/interfaces`, `GET /api/interfaces/history` (`Viewer+`) e `POST /api/interfaces/refresh` (`Operator+`).
+- Modal `#interfacesModal` (`🔌 Interfaces`) na Web UI com KPIs Multi-WAN, gráfico Canvas2D RX/TX por interface e filtros por tipo/estado.
+- Teste `testMultiWanAndInterfaces` + integração HTTP/RBAC `/api/v1/interfaces*` em `tests/test_core.cpp`.
+
 ## [1.6.0] - 2026-11-18 — Fase 3: Traceroute Avançado
 
 ### Adicionado

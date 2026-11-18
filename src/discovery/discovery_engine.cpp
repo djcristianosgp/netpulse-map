@@ -25,6 +25,7 @@
 
 #include "discovery_engine.hpp"
 #include "../models.hpp"
+#include "../net_monitor.hpp"
 
 #include <algorithm>
 #include <array>
@@ -202,11 +203,11 @@ std::string resolveLanHostname(const std::string& ip) {
 }
 
 std::vector<uint16_t> scanCommonPorts(const std::string& ip, double& ioBestRttMs) {
-  static constexpr std::array<uint16_t, 11> kPorts = {80, 443, 22, 445, 53, 3389, 554, 5000, 8008, 8080, 9100};
+  static constexpr std::array<uint16_t, 8> kPorts = {80, 443, 22, 445, 53, 3389, 554, 9100};
   std::vector<uint16_t> open;
   for (uint16_t p : kPorts) {
     double rtt = 0.0;
-    if (probeTcpPortQuick(ip, p, 85, rtt)) {
+    if (probeTcpPortQuick(ip, p, 50, rtt)) {
       open.push_back(p);
       if (ioBestRttMs <= 0.0 || rtt < ioBestRttMs) ioBestRttMs = rtt;
     }
@@ -571,6 +572,7 @@ void DiscoveryEngine::runActiveScan(std::stop_token st, const std::string& subne
 
   std::unordered_map<std::string, LanDeviceRecord> merged;
   for (auto& d : passiveBase) {
+    if (!d.isLocalHost) d.online = false; // verified by active sweep below
     merged[d.ip] = std::move(d);
   }
 
@@ -584,10 +586,10 @@ void DiscoveryEngine::runActiveScan(std::stop_token st, const std::string& subne
     }
   }
 
-  // Sweep subnet hosts with bounded 16-worker pool
+  // Sweep subnet hosts with bounded 24-worker pool
   std::mutex resMutex;
   std::atomic<size_t> nextIdx{0};
-  const size_t nThreads = std::min<size_t>(16, std::max<size_t>(1, candidateIps.size()));
+  const size_t nThreads = std::min<size_t>(24, std::max<size_t>(1, candidateIps.size()));
   std::vector<std::jthread> pool;
   pool.reserve(nThreads);
 
@@ -662,18 +664,10 @@ void DiscoveryEngine::runActiveScan(std::stop_token st, const std::string& subne
   }
 #endif
 
-  // Also enrich already-harvested non-local hosts (gateway / ARP entries) with ports + hostname
   std::vector<LanDeviceRecord> finalBatch;
   finalBatch.reserve(merged.size());
   for (auto& [ip, rec] : merged) {
-    if (!rec.isLocalHost && rec.openPorts.empty() && !st.stop_requested()) {
-      double rtt = rec.latencyMs;
-      auto ports = scanCommonPorts(ip, rtt);
-      rec.openPorts = joinPorts(ports);
-      if (rec.latencyMs <= 0.0 && rtt > 0.0) rec.latencyMs = rtt;
-      if (rec.hostname.empty()) rec.hostname = resolveLanHostname(ip);
-      rec.deviceType = inferDeviceType(false, rec.isGateway, rec.vendor, rec.hostname, ports);
-    }
+    (void)ip;
     finalBatch.push_back(std::move(rec));
   }
 

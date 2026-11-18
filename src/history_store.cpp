@@ -2233,7 +2233,7 @@ bool HistoryStore::upsertLanDevices(const std::vector<LanDeviceRecord>& devices,
         "  mac=CASE WHEN excluded.mac<>'' THEN excluded.mac ELSE lan_devices.mac END,"
         "  vendor=CASE WHEN excluded.vendor<>'' THEN excluded.vendor ELSE lan_devices.vendor END,"
         "  hostname=CASE WHEN excluded.hostname<>'' THEN excluded.hostname ELSE lan_devices.hostname END,"
-        "  device_type=CASE WHEN excluded.device_type<>'unknown' THEN excluded.device_type ELSE lan_devices.device_type END,"
+        "  device_type=CASE WHEN excluded.device_type NOT IN ('','unknown','Dispositivo LAN') OR lan_devices.device_type IN ('','unknown') THEN excluded.device_type ELSE lan_devices.device_type END,"
         "  interface_name=CASE WHEN excluded.interface_name<>'' THEN excluded.interface_name ELSE lan_devices.interface_name END,"
         "  subnet=CASE WHEN excluded.subnet<>'' THEN excluded.subnet ELSE lan_devices.subnet END,"
         "  is_gateway=excluded.is_gateway,"

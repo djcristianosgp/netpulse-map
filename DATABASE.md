@@ -89,6 +89,12 @@ Amostragem periódica por interface de rede (`Multi-WAN` e inventário físico/V
 - Índices: `idx_iface_id_ts(if_id, ts_ms DESC)` e `idx_iface_ts(ts_ms DESC)`.
 - Limpeza automática em `applyRetentionLocked()` (`WHERE ts_ms < cutoff`) e controle `maxDbSizeMb`.
 
+### `lan_devices` (Migration v5)
+Inventário persistente de dispositivos descobertos na rede local (`PRIMARY KEY (device_key)`):
+- `device_key`, `ip`, `mac`, `vendor`, `hostname`, `device_type`, `interface_name`, `subnet`, `is_gateway`, `is_local_host`, `online`, `latency_ms`, `open_ports`, `custom_label`, `first_seen_ms`, `last_seen_ms`, `seen_count`
+- Índices: `idx_lan_devices_ip(ip)` e `idx_lan_devices_last_seen(last_seen_ms DESC)`.
+- Retenção automática limpa dispositivos offline sem `custom_label` anteriores ao cutoff.
+
 ---
 
 ## 4. Pipeline Assíncrono & Política de Retenção (`src/history_store.*`)

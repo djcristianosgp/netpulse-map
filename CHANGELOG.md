@@ -2,6 +2,16 @@
 
 Todas as mudanças relevantes do **NetPulse** serão documentadas neste arquivo.
 
+## [1.8.0] - 2026-11-18 — Fase 5: Discovery Engine
+
+### Adicionado
+- Módulo `DiscoveryEngine` (`src/discovery/discovery_engine.*`) com coleta passiva (`GetIpNetTable` no Windows; `/proc/net/arp` no Linux) e varredura ativa `/24` limitada com pool de 24 workers (`SendARP` L2 no Windows, TCP SYN no Linux, portas comuns `{80,443,22,445,53,3389,554,9100}` e rDNS `getnameinfo`).
+- Tabela IEEE OUI offline embutida + detecção de MAC randomizado/LAA (`isLocallyAdministeredMac`, `lookupOuiVendor`) e classificação determinística de tipo (`inferDeviceType`: Roteador/Gateway, Estação Local, Impressora, Câmera/NVR, Máquina Virtual, Servidor/NAS, IoT, Estação, Dispositivo Móvel).
+- Migration v5 no SQLite (`lan_devices`) com persistência de primeira/última visualização, contagem `seen_count`, rótulos personalizados (`custom_label`), retenção de offline não rotulados e evento `new_lan_device` em `HistoryStore`.
+- Endpoints `GET /api/discovery/devices` (`Viewer+`), `POST /api/discovery/scan`, `POST /api/discovery/label` e `POST /api/discovery/devices/delete` / `DELETE /api/discovery/devices` (`Operator+` com `"confirm": true` + auditoria).
+- Modal `#discoveryModal` (`🛰 Dispositivos`) na Web UI com KPIs LAN, filtros (`Online`/`Offline`/`Gateways`), edição de rótulo, remoção confirmada e disparo de varredura `/24`.
+- Teste `testDiscoveryEngineAndOui` + integração HTTP/RBAC `/api/v1/discovery/*` em `tests/test_core.cpp`.
+
 ## [1.7.0] - 2026-11-18 — Fase 4: Multi-WAN e Interfaces de Rede
 
 ### Adicionado

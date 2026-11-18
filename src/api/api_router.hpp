@@ -2,6 +2,7 @@
 
 #include "../core/json_lite.hpp"
 #include "../history_store.hpp"
+#include "../network/interface_monitor.hpp"
 #include "../quality/network_quality_engine.hpp"
 #include "../security/audit_log.hpp"
 #include "../security/auth_manager.hpp"
@@ -43,6 +44,7 @@ struct ApiDependencies {
   std::function<void(const AppSettings&)> onSettingsApplied;
   std::function<void()> onRequestRestart;
   NetworkQualityEngine* quality = nullptr;
+  InterfaceMonitor* interfaces = nullptr;
 };
 
 class ApiRouter {

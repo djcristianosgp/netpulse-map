@@ -107,6 +107,60 @@ struct QualitySampleRecord {
   std::string error;
 };
 
+struct TraceHopRecord {
+  int ttl = 0;
+  bool timedOut = false;
+  std::string ip;
+  double rttMs = 0.0;
+  std::string hostname;
+  std::string asn;
+  std::string country;
+  std::string countryCode;
+  std::string city;
+  double lat = 0.0;
+  double lon = 0.0;
+};
+
+struct TraceRunRecord {
+  int64_t id = 0;
+  std::string targetIp;
+  std::string targetLabel;
+  std::string triggerKind = "manual"; // "manual" | "scheduled"
+  uint64_t startedAtMs = 0;
+  uint64_t completedAtMs = 0;
+  bool reached = false;
+  double totalRttMs = 0.0;
+  std::string pathHash;
+  bool changedFromPrev = false;
+  std::string error;
+  std::vector<TraceHopRecord> hops;
+};
+
+struct TraceMonitorRecord {
+  std::string targetIp;
+  std::string label;
+  int intervalSec = 300;
+  bool enabled = true;
+  uint64_t createdAtMs = 0;
+  uint64_t lastRunMs = 0;
+};
+
+struct InterfaceSampleRecord {
+  uint64_t tsMs = 0;
+  std::string ifId;
+  std::string ifName;
+  std::string ifType = "other";
+  std::string operStatus = "unknown";
+  bool isDefaultRoute = false;
+  uint64_t linkSpeedBps = 0;
+  double rxBps = 0.0;
+  double txBps = 0.0;
+  uint64_t rxBytes = 0;
+  uint64_t txBytes = 0;
+  uint64_t rxErrors = 0;
+  uint64_t txErrors = 0;
+};
+
 bool isSensitivePort(uint16_t port);
 uint64_t rangeToDurationMs(const std::string& range);
 
@@ -139,6 +193,18 @@ public:
   bool deleteQualityTarget(const std::string& id);
   std::string queryQualityHistoryJson(const std::string& targetId, const std::string& range);
   std::vector<QualitySampleRecord> loadRecentQualitySamples(const std::string& targetId, size_t maxCount = 120);
+
+  int64_t saveTraceRun(TraceRunRecord& run);
+  std::vector<TraceRunRecord> loadTraceRuns(const std::string& targetIp = {}, size_t limit = 30);
+  bool getTraceRunById(int64_t runId, TraceRunRecord& out);
+  std::string queryTraceHistoryJson(const std::string& targetIp = {}, size_t limit = 30);
+  std::vector<TraceMonitorRecord> loadTraceMonitors();
+  bool upsertTraceMonitor(const TraceMonitorRecord& mon);
+  bool deleteTraceMonitor(const std::string& targetIp);
+  bool updateTraceMonitorLastRun(const std::string& targetIp, uint64_t lastRunMs);
+
+  void enqueueInterfaceSamples(const std::vector<InterfaceSampleRecord>& samples);
+  std::string queryInterfaceHistoryJson(const std::string& ifId, const std::string& range);
 
   void flushNow();
   bool pruneNow();
@@ -209,6 +275,7 @@ private:
   std::vector<ServiceMetricPoint> pendingMetrics_;
   std::vector<ConnectionHistoryRecord> pendingConns_;
   std::vector<QualitySampleRecord> pendingQualitySamples_;
+  std::vector<InterfaceSampleRecord> pendingInterfaceSamples_;
   std::unordered_map<std::string, RollupDelta> pendingRollups_;
   std::unordered_map<uint64_t, NicSampleDelta> pendingNicSamples_;
 

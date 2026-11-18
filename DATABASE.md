@@ -76,6 +76,13 @@ Amostras contínuas de latência, jitter e resolução DNS:
 - Índices: `idx_quality_tid_ts(target_id, ts_ms DESC)` e `idx_quality_ts(ts_ms DESC)`.
 - Limpeza automática integrada a `applyRetentionLocked()` (`WHERE ts_ms < cutoff`) e controle de teto `maxDbSizeMb`.
 
+### `trace_runs`, `trace_hops` & `trace_monitors` (Migration v3)
+Persistência de execuções de traceroute avançado e monitoramento periódico de rotas:
+- `trace_runs`: `id`, `target_ip`, `target_label`, `trigger_kind` (`manual` | `scheduled`), `started_at_ms`, `completed_at_ms`, `reached`, `hop_count`, `total_rtt_ms`, `path_hash` (FNV-1a 64-bit), `changed_from_prev`, `error` (`idx_trace_runs_target_ts`, `idx_trace_runs_ts`).
+- `trace_hops`: `run_id`, `ttl`, `timed_out`, `ip`, `rtt_ms`, `hostname`, `asn`, `country`, `country_code`, `city`, `lat`, `lon` (`PRIMARY KEY (run_id, ttl)`).
+- `trace_monitors`: `target_ip`, `label`, `interval_sec` (`30..3600`), `enabled`, `created_at_ms`, `last_run_ms`.
+- Retenção automática remove `trace_runs WHERE started_at_ms < cutoff` e limpa `trace_hops` órfãos.
+
 ---
 
 ## 4. Pipeline Assíncrono & Política de Retenção (`src/history_store.*`)

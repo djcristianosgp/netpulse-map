@@ -78,6 +78,7 @@ cl /nologo /MP /std:c++20 /O2 /EHsc /W4 /utf-8 ^
   "%ROOT%src\traceroute.cpp" ^
   "%ROOT%src\history_store.cpp" ^
   "%ROOT%src\quality\network_quality_engine.cpp" ^
+  "%ROOT%src\network\interface_monitor.cpp" ^
   "%ROOT%src\actions.cpp" ^
   "%ROOT%src\tray_host.cpp" ^
   "%ROOT%build\sqlite3.obj" ^
@@ -109,6 +110,7 @@ cl /nologo /MP /std:c++20 /O2 /EHsc /W4 /utf-8 ^
   "%ROOT%build\obj_app\traceroute.obj" ^
   "%ROOT%build\obj_app\history_store.obj" ^
   "%ROOT%build\obj_app\network_quality_engine.obj" ^
+  "%ROOT%build\obj_app\interface_monitor.obj" ^
   "%ROOT%build\obj_app\actions.obj" ^
   "%ROOT%build\obj_app\tray_host.obj" ^
   "%ROOT%build\sqlite3.obj" ^

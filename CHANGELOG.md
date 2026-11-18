@@ -2,6 +2,16 @@
 
 Todas as mudanças relevantes do **NetPulse** serão documentadas neste arquivo.
 
+## [1.6.0] - 2026-11-18 — Fase 3: Traceroute Avançado
+
+### Adicionado
+- Migration v3 no SQLite (`src/storage/sqlite_db.cpp`): tabelas `trace_runs`, `trace_hops` (com rDNS, ASN e GeoIP) e `trace_monitors` integradas à retenção em `HistoryStore`.
+- Fingerprinting determinístico de caminho (`computeTracePathHash`, FNV-1a 64-bit por TTL:IP), algoritmo de comparação lado a lado (`computeTraceRouteDiff` / `serializeTraceDiffJson`) e detecção automática de mudança de rota (`changedFromPrev` + evento `route_changed`) em `src/traceroute.*`.
+- Agendador periódico desacoplado (`TracerouteService::schedulerLoop`) para alvos configuráveis (`30..3600s`) sem interferir no traceroute interativo.
+- Endpoints em `ApiRouter`: `GET /api/trace/history`, `GET /api/trace/diff`, `GET/POST /api/trace/monitors` e `POST /api/trace/monitors/delete` / `DELETE /api/trace/monitors` (Operator+ com `"confirm": true` e auditoria).
+- Modal `#traceModal` (`🧭 Rotas`) na Web UI com execuções salvas, seleção `A → B` de Route Diff por TTL e gerenciamento de monitores periódicos, além de exibição de ASN e atalho `Histórico` no inspetor lateral.
+- Teste `testTracerouteHistoryAndRouteDiff` e integração HTTP/RBAC em `tests/test_core.cpp`.
+
 ## [1.5.0] - 2026-11-18 — Fase 2: Network Quality Engine
 
 ### Adicionado

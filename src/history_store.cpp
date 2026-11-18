@@ -565,6 +565,15 @@ void HistoryStore::enqueueQualitySample(const QualitySampleRecord& sample) {
   }
 }
 
+void HistoryStore::enqueueInterfaceSamples(const std::vector<InterfaceSampleRecord>& samples) {
+  if (samples.empty()) return;
+  std::lock_guard lock(queueMutex_);
+  for (const auto& s : samples) pendingInterfaceSamples_.push_back(s);
+  if (pendingInterfaceSamples_.size() >= 32) {
+    queueCv_.notify_one();
+  }
+}
+
 void HistoryStore::writerLoop(std::stop_token st) {
   while (!st.stop_requested()) {
     {
@@ -574,6 +583,7 @@ void HistoryStore::writerLoop(std::stop_token st) {
                pendingConns_.size() >= 128 ||
                pendingMetrics_.size() >= 32 ||
                pendingQualitySamples_.size() >= 32 ||
+               pendingInterfaceSamples_.size() >= 32 ||
                pruneRequested_.load();
       });
     }
@@ -591,19 +601,22 @@ void HistoryStore::drainAndWriteBatch() {
   std::vector<ServiceMetricPoint> mets;
   std::vector<ConnectionHistoryRecord> conns;
   std::vector<QualitySampleRecord> qsamples;
+  std::vector<InterfaceSampleRecord> ifsamples;
   std::unordered_map<std::string, RollupDelta> rollups;
   std::unordered_map<uint64_t, NicSampleDelta> nics;
 
   {
     std::lock_guard lock(queueMutex_);
     if (pendingEvents_.empty() && pendingMetrics_.empty() && pendingConns_.empty() &&
-        pendingQualitySamples_.empty() && pendingRollups_.empty() && pendingNicSamples_.empty()) {
+        pendingQualitySamples_.empty() && pendingInterfaceSamples_.empty() &&
+        pendingRollups_.empty() && pendingNicSamples_.empty()) {
       return;
     }
     evs.swap(pendingEvents_);
     mets.swap(pendingMetrics_);
     conns.swap(pendingConns_);
     qsamples.swap(pendingQualitySamples_);
+    ifsamples.swap(pendingInterfaceSamples_);
     rollups.swap(pendingRollups_);
     nics.swap(pendingNicSamples_);
   }
@@ -760,6 +773,30 @@ void HistoryStore::drainAndWriteBatch() {
         insQs.stepDone();
       }
     }
+
+    if (!ifsamples.empty()) {
+      SqliteStmt insIf(
+          db,
+          "INSERT INTO interface_samples(ts_ms, if_id, if_name, if_type, oper_status, is_default_route, link_speed_bps, rx_bps, tx_bps, rx_bytes, tx_bytes, rx_errors, tx_errors) "
+          "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?);");
+      for (const auto& is : ifsamples) {
+        insIf.reset();
+        insIf.bindInt64(1, static_cast<int64_t>(is.tsMs));
+        insIf.bindText(2, is.ifId);
+        insIf.bindText(3, is.ifName);
+        insIf.bindText(4, is.ifType);
+        insIf.bindText(5, is.operStatus);
+        insIf.bindInt64(6, is.isDefaultRoute ? 1 : 0);
+        insIf.bindInt64(7, static_cast<int64_t>(is.linkSpeedBps));
+        insIf.bindDouble(8, is.rxBps);
+        insIf.bindDouble(9, is.txBps);
+        insIf.bindInt64(10, static_cast<int64_t>(is.rxBytes));
+        insIf.bindInt64(11, static_cast<int64_t>(is.txBytes));
+        insIf.bindInt64(12, static_cast<int64_t>(is.rxErrors));
+        insIf.bindInt64(13, static_cast<int64_t>(is.txErrors));
+        insIf.stepDone();
+      }
+    }
     return true;
   });
 }
@@ -795,6 +832,12 @@ bool HistoryStore::applyRetentionLocked(sqlite3* db) {
   delBefore("DELETE FROM traffic_rollups WHERE bucket_start_ms < ?;");
   delBefore("DELETE FROM nic_traffic_samples WHERE bucket_start_ms < ?;");
   delBefore("DELETE FROM quality_samples WHERE ts_ms < ?;");
+  delBefore("DELETE FROM interface_samples WHERE ts_ms < ?;");
+  delBefore("DELETE FROM trace_runs WHERE started_at_ms < ?;");
+  {
+    SqliteStmt st(db, "DELETE FROM trace_hops WHERE run_id NOT IN (SELECT id FROM trace_runs);");
+    if (st.valid()) st.stepDone();
+  }
   return true;
 }
 
@@ -815,6 +858,8 @@ bool HistoryStore::pruneNow() {
       if (delMet.valid()) delMet.stepDone();
       SqliteStmt delQs(db, "DELETE FROM quality_samples WHERE id IN (SELECT id FROM quality_samples ORDER BY ts_ms ASC LIMIT 5000);");
       if (delQs.valid()) delQs.stepDone();
+      SqliteStmt delIf(db, "DELETE FROM interface_samples WHERE id IN (SELECT id FROM interface_samples ORDER BY ts_ms ASC LIMIT 5000);");
+      if (delIf.valid()) delIf.stepDone();
       return true;
     });
   }
@@ -1377,6 +1422,17 @@ std::string HistoryStore::getStorageStatsJson() {
       return true;
     });
   }
+  int64_t traceCnt = 0;
+  int64_t ifSampleCnt = 0;
+  if (db_.isOpen()) {
+    db_.withLock([&](sqlite3* db) {
+      SqliteStmt st(db, "SELECT COUNT(*) FROM trace_runs;");
+      if (st.valid() && st.step() == SQLITE_ROW) traceCnt = st.colInt64(0);
+      SqliteStmt st2(db, "SELECT COUNT(*) FROM interface_samples;");
+      if (st2.valid() && st2.step() == SQLITE_ROW) ifSampleCnt = st2.colInt64(0);
+      return true;
+    });
+  }
 
   std::string out = "{\"engine\":\"sqlite3\",\"sqliteVersion\":";
   appendJsonEscaped(out, sqlite3_libversion());
@@ -1404,6 +1460,10 @@ std::string HistoryStore::getStorageStatsJson() {
   out += std::to_string(nicCnt);
   out += ",\"qualitySamples\":";
   out += std::to_string(qsCnt);
+  out += ",\"traceRuns\":";
+  out += std::to_string(traceCnt);
+  out += ",\"interfaceSamples\":";
+  out += std::to_string(ifSampleCnt);
   out += "}}";
   return out;
 }
@@ -1682,6 +1742,431 @@ std::string HistoryStore::queryQualityHistoryJson(const std::string& targetId, c
     appendNum(out, bLoss);
     out += ",\"dnsMs\":";
     appendNum(out, bDns);
+    out.push_back('}');
+  }
+  out += "]}";
+  return out;
+}
+
+int64_t HistoryStore::saveTraceRun(TraceRunRecord& run) {
+  if (!db_.isOpen() || run.targetIp.empty()) return 0;
+
+  bool changedFromPrev = false;
+  int64_t insertedId = 0;
+
+  db_.withTransaction([&](sqlite3* db) {
+    SqliteStmt prevSt(db, "SELECT path_hash FROM trace_runs WHERE target_ip = ? ORDER BY started_at_ms DESC, id DESC LIMIT 1;");
+    if (prevSt.valid()) {
+      prevSt.bindText(1, run.targetIp);
+      if (prevSt.step() == SQLITE_ROW) {
+        const std::string prevHash = prevSt.colText(0);
+        if (!prevHash.empty() && !run.pathHash.empty() && prevHash != run.pathHash) {
+          changedFromPrev = true;
+        }
+      }
+    }
+    run.changedFromPrev = changedFromPrev;
+
+    SqliteStmt ins(
+        db,
+        "INSERT INTO trace_runs("
+        "  target_ip, target_label, trigger_kind, started_at_ms, completed_at_ms,"
+        "  reached, hop_count, total_rtt_ms, path_hash, changed_from_prev, error"
+        ") VALUES(?,?,?,?,?,?,?,?,?,?,?);");
+    if (!ins.valid()) return false;
+    ins.bindText(1, run.targetIp);
+    ins.bindText(2, run.targetLabel);
+    ins.bindText(3, run.triggerKind.empty() ? "manual" : run.triggerKind);
+    ins.bindInt64(4, static_cast<int64_t>(run.startedAtMs));
+    ins.bindInt64(5, static_cast<int64_t>(run.completedAtMs));
+    ins.bindInt64(6, run.reached ? 1 : 0);
+    ins.bindInt64(7, static_cast<int64_t>(run.hops.size()));
+    ins.bindDouble(8, run.totalRttMs);
+    ins.bindText(9, run.pathHash);
+    ins.bindInt64(10, run.changedFromPrev ? 1 : 0);
+    ins.bindText(11, run.error);
+    if (!ins.stepDone()) return false;
+
+    insertedId = sqlite3_last_insert_rowid(db);
+    run.id = insertedId;
+
+    SqliteStmt hopIns(
+        db,
+        "INSERT INTO trace_hops("
+        "  run_id, ttl, timed_out, ip, rtt_ms, hostname, asn, country, country_code, city, lat, lon"
+        ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?);");
+    if (hopIns.valid()) {
+      for (const auto& h : run.hops) {
+        hopIns.reset();
+        hopIns.bindInt64(1, insertedId);
+        hopIns.bindInt64(2, static_cast<int64_t>(h.ttl));
+        hopIns.bindInt64(3, h.timedOut ? 1 : 0);
+        hopIns.bindText(4, h.ip);
+        hopIns.bindDouble(5, h.rttMs);
+        hopIns.bindText(6, h.hostname);
+        hopIns.bindText(7, h.asn);
+        hopIns.bindText(8, h.country);
+        hopIns.bindText(9, h.countryCode);
+        hopIns.bindText(10, h.city);
+        hopIns.bindDouble(11, h.lat);
+        hopIns.bindDouble(12, h.lon);
+        hopIns.stepDone();
+      }
+    }
+    return true;
+  });
+
+  if (insertedId > 0 && changedFromPrev) {
+    enqueueEvent(
+        HistoryEvent{
+            nowEpochMs(),
+            "warn",
+            "route_changed",
+            "Variação de rota detectada: " + (run.targetLabel.empty() ? run.targetIp : run.targetLabel),
+            "IP " + run.targetIp + " · saltos " + std::to_string(run.hops.size()) + " · hash " + run.pathHash,
+        },
+        false);
+  }
+  return insertedId;
+}
+
+std::vector<TraceRunRecord> HistoryStore::loadTraceRuns(const std::string& targetIp, size_t limit) {
+  std::vector<TraceRunRecord> out;
+  if (!db_.isOpen()) return out;
+  const size_t lim = std::clamp<size_t>(limit, 1, 100);
+
+  db_.withLock([&](sqlite3* db) {
+    std::string sql =
+        "SELECT id, target_ip, target_label, trigger_kind, started_at_ms, completed_at_ms,"
+        " reached, total_rtt_ms, path_hash, changed_from_prev, error "
+        "FROM trace_runs";
+    if (!targetIp.empty()) sql += " WHERE target_ip = ?";
+    sql += " ORDER BY started_at_ms DESC, id DESC LIMIT ?;";
+
+    SqliteStmt st(db, sql.c_str());
+    int idx = 1;
+    if (!targetIp.empty()) st.bindText(idx++, targetIp);
+    st.bindInt64(idx++, static_cast<int64_t>(lim));
+
+    while (st.valid() && st.step() == SQLITE_ROW) {
+      TraceRunRecord r;
+      r.id = st.colInt64(0);
+      r.targetIp = st.colText(1);
+      r.targetLabel = st.colText(2);
+      r.triggerKind = st.colText(3);
+      r.startedAtMs = static_cast<uint64_t>(st.colInt64(4));
+      r.completedAtMs = static_cast<uint64_t>(st.colInt64(5));
+      r.reached = (st.colInt64(6) != 0);
+      r.totalRttMs = st.colDouble(7);
+      r.pathHash = st.colText(8);
+      r.changedFromPrev = (st.colInt64(9) != 0);
+      r.error = st.colText(10);
+      out.push_back(std::move(r));
+    }
+
+    SqliteStmt hopSt(
+        db,
+        "SELECT ttl, timed_out, ip, rtt_ms, hostname, asn, country, country_code, city, lat, lon "
+        "FROM trace_hops WHERE run_id = ? ORDER BY ttl ASC;");
+    if (hopSt.valid()) {
+      for (auto& r : out) {
+        hopSt.reset();
+        hopSt.bindInt64(1, r.id);
+        while (hopSt.step() == SQLITE_ROW) {
+          TraceHopRecord h;
+          h.ttl = static_cast<int>(hopSt.colInt64(0));
+          h.timedOut = (hopSt.colInt64(1) != 0);
+          h.ip = hopSt.colText(2);
+          h.rttMs = hopSt.colDouble(3);
+          h.hostname = hopSt.colText(4);
+          h.asn = hopSt.colText(5);
+          h.country = hopSt.colText(6);
+          h.countryCode = hopSt.colText(7);
+          h.city = hopSt.colText(8);
+          h.lat = hopSt.colDouble(9);
+          h.lon = hopSt.colDouble(10);
+          r.hops.push_back(std::move(h));
+        }
+      }
+    }
+    return true;
+  });
+  return out;
+}
+
+bool HistoryStore::getTraceRunById(int64_t runId, TraceRunRecord& out) {
+  if (!db_.isOpen() || runId <= 0) return false;
+  bool found = false;
+  db_.withLock([&](sqlite3* db) {
+    SqliteStmt st(
+        db,
+        "SELECT id, target_ip, target_label, trigger_kind, started_at_ms, completed_at_ms,"
+        " reached, total_rtt_ms, path_hash, changed_from_prev, error "
+        "FROM trace_runs WHERE id = ?;");
+    st.bindInt64(1, runId);
+    if (st.valid() && st.step() == SQLITE_ROW) {
+      out = TraceRunRecord{};
+      out.id = st.colInt64(0);
+      out.targetIp = st.colText(1);
+      out.targetLabel = st.colText(2);
+      out.triggerKind = st.colText(3);
+      out.startedAtMs = static_cast<uint64_t>(st.colInt64(4));
+      out.completedAtMs = static_cast<uint64_t>(st.colInt64(5));
+      out.reached = (st.colInt64(6) != 0);
+      out.totalRttMs = st.colDouble(7);
+      out.pathHash = st.colText(8);
+      out.changedFromPrev = (st.colInt64(9) != 0);
+      out.error = st.colText(10);
+      found = true;
+
+      SqliteStmt hopSt(
+          db,
+          "SELECT ttl, timed_out, ip, rtt_ms, hostname, asn, country, country_code, city, lat, lon "
+          "FROM trace_hops WHERE run_id = ? ORDER BY ttl ASC;");
+      hopSt.bindInt64(1, out.id);
+      while (hopSt.valid() && hopSt.step() == SQLITE_ROW) {
+        TraceHopRecord h;
+        h.ttl = static_cast<int>(hopSt.colInt64(0));
+        h.timedOut = (hopSt.colInt64(1) != 0);
+        h.ip = hopSt.colText(2);
+        h.rttMs = hopSt.colDouble(3);
+        h.hostname = hopSt.colText(4);
+        h.asn = hopSt.colText(5);
+        h.country = hopSt.colText(6);
+        h.countryCode = hopSt.colText(7);
+        h.city = hopSt.colText(8);
+        h.lat = hopSt.colDouble(9);
+        h.lon = hopSt.colDouble(10);
+        out.hops.push_back(std::move(h));
+      }
+    }
+    return true;
+  });
+  return found;
+}
+
+std::string HistoryStore::queryTraceHistoryJson(const std::string& targetIp, size_t limit) {
+  auto runs = loadTraceRuns(targetIp, limit);
+  char num[32];
+  std::string out = "{\"targetIp\":";
+  appendJsonEscaped(out, targetIp);
+  out += ",\"runs\":[";
+
+  for (size_t i = 0; i < runs.size(); ++i) {
+    const auto& r = runs[i];
+    if (i > 0) out.push_back(',');
+    out += "{\"id\":";
+    out += std::to_string(r.id);
+    out += ",\"targetIp\":";
+    appendJsonEscaped(out, r.targetIp);
+    out += ",\"targetLabel\":";
+    appendJsonEscaped(out, r.targetLabel);
+    out += ",\"triggerKind\":";
+    appendJsonEscaped(out, r.triggerKind);
+    out += ",\"startedAt\":";
+    out += std::to_string(r.startedAtMs);
+    out += ",\"completedAt\":";
+    out += std::to_string(r.completedAtMs);
+    out += ",\"reached\":";
+    out += (r.reached ? "true" : "false");
+    out += ",\"hopCount\":";
+    out += std::to_string(r.hops.size());
+    std::snprintf(num, sizeof(num), "%.1f", r.totalRttMs);
+    out += ",\"totalRttMs\":";
+    out += num;
+    out += ",\"pathHash\":";
+    appendJsonEscaped(out, r.pathHash);
+    out += ",\"changedFromPrev\":";
+    out += (r.changedFromPrev ? "true" : "false");
+    out += ",\"error\":";
+    appendJsonEscaped(out, r.error);
+    out += ",\"hops\":[";
+    for (size_t j = 0; j < r.hops.size(); ++j) {
+      const auto& h = r.hops[j];
+      if (j > 0) out.push_back(',');
+      out += "{\"ttl\":";
+      out += std::to_string(h.ttl);
+      out += ",\"timedOut\":";
+      out += (h.timedOut ? "true" : "false");
+      out += ",\"ip\":";
+      appendJsonEscaped(out, h.ip);
+      std::snprintf(num, sizeof(num), "%.1f", h.rttMs);
+      out += ",\"rttMs\":";
+      out += num;
+      out += ",\"host\":";
+      appendJsonEscaped(out, h.hostname);
+      out += ",\"asn\":";
+      appendJsonEscaped(out, h.asn);
+      out += ",\"country\":";
+      appendJsonEscaped(out, h.country);
+      out += ",\"cc\":";
+      appendJsonEscaped(out, h.countryCode);
+      out += ",\"city\":";
+      appendJsonEscaped(out, h.city);
+      out.push_back('}');
+    }
+    out += "]}";
+  }
+  out += "]}";
+  return out;
+}
+
+std::vector<TraceMonitorRecord> HistoryStore::loadTraceMonitors() {
+  std::vector<TraceMonitorRecord> out;
+  if (!db_.isOpen()) return out;
+  db_.withLock([&](sqlite3* db) {
+    SqliteStmt st(
+        db,
+        "SELECT target_ip, label, interval_sec, enabled, created_at_ms, last_run_ms "
+        "FROM trace_monitors ORDER BY created_at_ms ASC;");
+    while (st.valid() && st.step() == SQLITE_ROW) {
+      TraceMonitorRecord m;
+      m.targetIp = st.colText(0);
+      m.label = st.colText(1);
+      m.intervalSec = static_cast<int>(std::clamp<int64_t>(st.colInt64(2), 30, 3600));
+      m.enabled = (st.colInt64(3) != 0);
+      m.createdAtMs = static_cast<uint64_t>(std::max<int64_t>(0, st.colInt64(4)));
+      m.lastRunMs = static_cast<uint64_t>(std::max<int64_t>(0, st.colInt64(5)));
+      out.push_back(std::move(m));
+    }
+    return true;
+  });
+  return out;
+}
+
+bool HistoryStore::upsertTraceMonitor(const TraceMonitorRecord& mon) {
+  if (!db_.isOpen() || mon.targetIp.empty()) return false;
+  return db_.withTransaction([&](sqlite3* db) {
+    SqliteStmt st(
+        db,
+        "INSERT INTO trace_monitors(target_ip, label, interval_sec, enabled, created_at_ms, last_run_ms) "
+        "VALUES(?,?,?,?,?,?) "
+        "ON CONFLICT(target_ip) DO UPDATE SET "
+        "  label=excluded.label, interval_sec=excluded.interval_sec, enabled=excluded.enabled;");
+    st.bindText(1, mon.targetIp);
+    st.bindText(2, mon.label);
+    st.bindInt64(3, static_cast<int64_t>(std::clamp(mon.intervalSec, 30, 3600)));
+    st.bindInt64(4, mon.enabled ? 1 : 0);
+    st.bindInt64(5, static_cast<int64_t>(mon.createdAtMs > 0 ? mon.createdAtMs : nowEpochMs()));
+    st.bindInt64(6, static_cast<int64_t>(mon.lastRunMs));
+    return st.stepDone();
+  });
+}
+
+bool HistoryStore::deleteTraceMonitor(const std::string& targetIp) {
+  if (!db_.isOpen() || targetIp.empty()) return false;
+  return db_.withTransaction([&](sqlite3* db) {
+    SqliteStmt st(db, "DELETE FROM trace_monitors WHERE target_ip = ?;");
+    st.bindText(1, targetIp);
+    return st.stepDone();
+  });
+}
+
+bool HistoryStore::updateTraceMonitorLastRun(const std::string& targetIp, uint64_t lastRunMs) {
+  if (!db_.isOpen() || targetIp.empty()) return false;
+  return db_.withTransaction([&](sqlite3* db) {
+    SqliteStmt st(db, "UPDATE trace_monitors SET last_run_ms = ? WHERE target_ip = ?;");
+    st.bindInt64(1, static_cast<int64_t>(lastRunMs));
+    st.bindText(2, targetIp);
+    return st.stepDone();
+  });
+}
+
+std::string HistoryStore::queryInterfaceHistoryJson(const std::string& ifId, const std::string& range) {
+  drainAndWriteBatch();
+  const uint64_t now = nowEpochMs();
+  const uint64_t dur = rangeToDurationMs(range.empty() ? "1h" : range);
+  const uint64_t cutoff = (now > dur) ? (now - dur) : 0ULL;
+
+  uint64_t bucketMs = 60000ULL; // 1h -> 60s
+  if (range == "15m") bucketMs = 15000ULL;
+  else if (range == "24h" || range == "1d") bucketMs = 600000ULL;
+  else if (range == "7d") bucketMs = 3600000ULL;
+
+  struct IfBucket {
+    uint64_t ts = 0;
+    double rxSum = 0.0;
+    double txSum = 0.0;
+    double maxRx = 0.0;
+    double maxTx = 0.0;
+    size_t cnt = 0;
+    int64_t rxErr = 0;
+    int64_t txErr = 0;
+  };
+  std::vector<IfBucket> buckets;
+
+  if (db_.isOpen() && !ifId.empty()) {
+    db_.withLock([&](sqlite3* db) {
+      SqliteStmt st(
+          db,
+          "SELECT ts_ms, rx_bps, tx_bps, rx_errors, tx_errors "
+          "FROM interface_samples WHERE if_id = ? AND ts_ms >= ? ORDER BY ts_ms ASC;");
+      st.bindText(1, ifId);
+      st.bindInt64(2, static_cast<int64_t>(cutoff));
+
+      IfBucket cur;
+      bool hasCur = false;
+      int64_t prevRxErr = -1;
+      int64_t prevTxErr = -1;
+      while (st.valid() && st.step() == SQLITE_ROW) {
+        const uint64_t ts = static_cast<uint64_t>(st.colInt64(0));
+        const double rx = st.colDouble(1);
+        const double tx = st.colDouble(2);
+        const int64_t rErr = st.colInt64(3);
+        const int64_t tErr = st.colInt64(4);
+        const int64_t dRxErr = (prevRxErr >= 0 && rErr >= prevRxErr) ? (rErr - prevRxErr) : 0;
+        const int64_t dTxErr = (prevTxErr >= 0 && tErr >= prevTxErr) ? (tErr - prevTxErr) : 0;
+        prevRxErr = rErr;
+        prevTxErr = tErr;
+
+        const uint64_t bTs = floorBucket(ts, bucketMs);
+        if (!hasCur || cur.ts != bTs) {
+          if (hasCur) buckets.push_back(cur);
+          cur = IfBucket{};
+          cur.ts = bTs;
+          hasCur = true;
+        }
+        cur.rxSum += rx;
+        cur.txSum += tx;
+        cur.maxRx = std::max(cur.maxRx, rx);
+        cur.maxTx = std::max(cur.maxTx, tx);
+        cur.rxErr += dRxErr;
+        cur.txErr += dTxErr;
+        cur.cnt++;
+      }
+      if (hasCur) buckets.push_back(cur);
+      return true;
+    });
+  }
+
+  char num[32];
+  auto appendNum = [&](std::string& dst, double v) {
+    std::snprintf(num, sizeof(num), "%.1f", v);
+    dst += num;
+  };
+
+  std::string out = "{\"ifId\":";
+  appendJsonEscaped(out, ifId);
+  out += ",\"range\":";
+  appendJsonEscaped(out, range.empty() ? "1h" : range);
+  out += ",\"series\":[";
+  for (size_t i = 0; i < buckets.size(); ++i) {
+    const auto& b = buckets[i];
+    if (i > 0) out.push_back(',');
+    const double avgRx = b.cnt > 0 ? (b.rxSum / static_cast<double>(b.cnt)) : 0.0;
+    const double avgTx = b.cnt > 0 ? (b.txSum / static_cast<double>(b.cnt)) : 0.0;
+    out += "{\"ts\":";
+    out += std::to_string(b.ts);
+    out += ",\"avgRxBps\":";
+    appendNum(out, avgRx);
+    out += ",\"avgTxBps\":";
+    appendNum(out, avgTx);
+    out += ",\"maxRxBps\":";
+    appendNum(out, b.maxRx);
+    out += ",\"maxTxBps\":";
+    appendNum(out, b.maxTx);
+    out += ",\"errors\":";
+    out += std::to_string(b.rxErr + b.txErr);
     out.push_back('}');
   }
   out += "]}";

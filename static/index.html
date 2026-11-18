@@ -72,6 +72,8 @@
       <button class="ctrl-btn" id="btnPause" title="Pausar/Retomar stream (Espaço)">Pausar</button>
       <button class="ctrl-btn" id="btnReset" title="Mostrar planeta inteiro (R)">Planeta</button>
       <button class="ctrl-btn" id="btnQuality" title="Qualidade de Rede, Latência, Jitter, DNS &amp; Diagnóstico">📶 Qualidade</button>
+      <button class="ctrl-btn" id="btnTraceModal" title="Traceroute Avançado, Histórico de Rotas &amp; Diff">🧭 Rotas</button>
+      <button class="ctrl-btn" id="btnInterfaces" title="Multi-WAN &amp; Interfaces de Rede">🔌 Interfaces</button>
       <button class="ctrl-btn" id="btnAnalytics" title="Histórico &amp; Analytics SQLite">📊 Analytics</button>
       <button class="ctrl-btn" id="btnSecurity" title="Segurança, Tokens & Auditoria">🛡 <span id="authRoleBadge">...</span></button>
       <button class="ctrl-btn" id="btnSettings" title="Configurações da aplicação">⚙</button>
@@ -495,6 +497,111 @@
             <button type="submit" class="ctrl-btn active" style="height:30px">+ Adicionar Destino</button>
           </form>
           <div id="qualFormFeedback" class="item-geo hidden"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Advanced Traceroute, Route History & Diff Modal -->
+  <div id="traceModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="traceModalTitle">
+    <div class="modal-card modal-card-xl glass">
+      <div class="modal-head">
+        <div>
+          <div class="insp-eyebrow">TRACEROUTE AVANÇADO · HISTÓRICO, MONITORAMENTO &amp; ROUTE DIFF</div>
+          <h2 class="insp-title" id="traceModalTitle">Histórico e Variação de Rotas</h2>
+        </div>
+        <button class="close-btn" id="btnCloseTraceModal" title="Fechar (Esc)">✕</button>
+      </div>
+      <div class="modal-body" style="max-height:80vh;overflow-y:auto">
+        <div class="tab-bar tab-bar-2" id="traceTabs">
+          <button type="button" class="tab-btn active" data-ttab="history">Histórico &amp; Diff</button>
+          <button type="button" class="tab-btn" data-ttab="monitors">Monitoramento Periódico</button>
+        </div>
+
+        <div id="traceViewHistory" class="ana-view">
+          <div class="add-svc-row" style="flex-wrap:wrap">
+            <input id="traceFilterIp" type="search" placeholder="IP destino (ex: 1.1.1.1 — vazio lista todos)" style="flex:1;min-width:190px;height:30px;border-radius:7px;border:1px solid rgba(148,163,184,0.22);background:rgba(15,23,42,0.8);color:var(--text-main);padding:0 8px;font-size:12px" />
+            <button type="button" class="ctrl-btn" id="btnTraceFilterApply" style="height:30px">↻ Filtrar</button>
+            <button type="button" class="ctrl-btn active" id="btnTraceRunTarget" style="height:30px">▶ Executar Traceroute</button>
+          </div>
+
+          <div class="notify-group">
+            <div class="notify-cats-head" style="border-top:none;padding-top:0">
+              <span>Execuções Registradas</span>
+              <span class="sec-row-meta">Selecione Baseline (A) e Atual (B) para comparar</span>
+            </div>
+            <div id="traceRunsList" class="sec-list" style="max-height:220px"></div>
+          </div>
+
+          <div class="notify-group">
+            <div class="notify-cats-head" style="border-top:none;padding-top:0;flex-wrap:wrap;gap:6px">
+              <span>Comparação / Route Diff (TTL por Salto)</span>
+              <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                <select id="traceDiffRunA" class="ctrl-select" style="height:26px"></select>
+                <span>→</span>
+                <select id="traceDiffRunB" class="ctrl-select" style="height:26px"></select>
+                <button type="button" class="ctrl-btn active" id="btnComputeTraceDiff" style="height:26px;font-size:11px">Comparar</button>
+              </div>
+            </div>
+            <div id="traceDiffOutput" class="sec-list" style="max-height:230px"></div>
+          </div>
+        </div>
+
+        <div id="traceViewMonitors" class="ana-view hidden">
+          <form id="traceMonitorForm" class="add-svc-row" style="flex-wrap:wrap">
+            <input id="tmIpInput" type="text" placeholder="IP alvo (ex: 8.8.8.8)" maxlength="64" required style="flex:1;min-width:140px;height:30px;border-radius:7px;border:1px solid rgba(148,163,184,0.22);background:rgba(15,23,42,0.8);color:var(--text-main);padding:0 8px;font-size:12px" />
+            <input id="tmLabelInput" type="text" placeholder="Rótulo (ex: Google DNS)" maxlength="64" style="flex:1;min-width:140px;height:30px;border-radius:7px;border:1px solid rgba(148,163,184,0.22);background:rgba(15,23,42,0.8);color:var(--text-main);padding:0 8px;font-size:12px" />
+            <input id="tmIntervalInput" type="number" min="30" max="3600" value="300" title="Intervalo em segundos (30..3600)" style="width:86px;height:30px;border-radius:7px;border:1px solid rgba(148,163,184,0.22);background:rgba(15,23,42,0.8);color:var(--text-main);padding:0 8px;font-size:12px" />
+            <button type="submit" class="ctrl-btn active" style="height:30px">+ Monitorar Rota</button>
+          </form>
+          <div id="traceMonitorsList" class="sec-list" style="max-height:360px"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Multi-WAN & Network Interfaces Modal -->
+  <div id="interfacesModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="ifaceModalTitle">
+    <div class="modal-card modal-card-xl glass">
+      <div class="modal-head">
+        <div>
+          <div class="insp-eyebrow">MULTI-WAN &amp; INTERFACES DE REDE · ETHERNET · WI-FI · VPN · VIRTUAL</div>
+          <h2 class="insp-title" id="ifaceModalTitle">Inventário de Interfaces &amp; Gateways</h2>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <select id="ifaceRangeSelect" class="ctrl-select" style="height:28px">
+            <option value="15m">Últimos 15 min</option>
+            <option value="1h" selected>Última hora</option>
+            <option value="24h">Últimas 24 horas</option>
+            <option value="7d">Últimos 7 dias</option>
+          </select>
+          <select id="ifaceFilterSelect" class="ctrl-select" style="height:28px">
+            <option value="all">Todas interfaces</option>
+            <option value="wan">WAN / Físicas</option>
+            <option value="vpn">VPN / Túneis</option>
+            <option value="virtual">Virtuais</option>
+            <option value="up">Somente UP</option>
+          </select>
+          <button type="button" class="ctrl-btn" id="btnIfaceRefresh" style="height:28px">↻ Atualizar</button>
+          <button class="close-btn" id="btnCloseInterfaces" title="Fechar (Esc)">✕</button>
+        </div>
+      </div>
+      <div class="modal-body" style="max-height:80vh;overflow-y:auto">
+        <div id="ifaceSummaryGrid" class="ana-kpi-grid"></div>
+
+        <div class="notify-group">
+          <div class="notify-cats-head" style="border-top:none;padding-top:0">
+            <span id="ifaceChartTitle">Histórico por Interface (↓ RX Ciano · ↑ TX Verde)</span>
+            <span id="ifaceChartStats" class="sec-row-meta">Selecione uma interface abaixo</span>
+          </div>
+          <canvas id="ifaceHistoryChart" width="880" height="140" class="svc-spark" style="height:140px"></canvas>
+        </div>
+
+        <div class="notify-group">
+          <div class="notify-cats-head" style="border-top:none;padding-top:0">
+            <span>Interfaces Detectadas (IPs, MAC, Link Speed, Gateways, DNS, RX/TX e Erros)</span>
+          </div>
+          <div id="ifaceList" class="sec-list" style="max-height:310px"></div>
         </div>
       </div>
     </div>

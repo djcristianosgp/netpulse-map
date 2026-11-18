@@ -350,6 +350,111 @@ bool SqliteDb::runMigrations(std::string& outError) {
     if (!execLocked("COMMIT;", outError)) return false;
   }
 
+  if (currentVer < 3) {
+    if (!execLocked("BEGIN IMMEDIATE;", outError)) return false;
+    const char* m3 = R"SQL(
+      CREATE TABLE IF NOT EXISTS trace_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        target_ip TEXT NOT NULL,
+        target_label TEXT NOT NULL DEFAULT '',
+        trigger_kind TEXT NOT NULL DEFAULT 'manual',
+        started_at_ms INTEGER NOT NULL,
+        completed_at_ms INTEGER NOT NULL DEFAULT 0,
+        reached INTEGER NOT NULL DEFAULT 0,
+        hop_count INTEGER NOT NULL DEFAULT 0,
+        total_rtt_ms REAL NOT NULL DEFAULT 0,
+        path_hash TEXT NOT NULL DEFAULT '',
+        changed_from_prev INTEGER NOT NULL DEFAULT 0,
+        error TEXT NOT NULL DEFAULT ''
+      );
+      CREATE INDEX IF NOT EXISTS idx_trace_runs_target_ts ON trace_runs(target_ip, started_at_ms DESC);
+      CREATE INDEX IF NOT EXISTS idx_trace_runs_ts ON trace_runs(started_at_ms DESC);
+
+      CREATE TABLE IF NOT EXISTS trace_hops (
+        run_id INTEGER NOT NULL,
+        ttl INTEGER NOT NULL,
+        timed_out INTEGER NOT NULL DEFAULT 0,
+        ip TEXT NOT NULL DEFAULT '',
+        rtt_ms REAL NOT NULL DEFAULT 0,
+        hostname TEXT NOT NULL DEFAULT '',
+        asn TEXT NOT NULL DEFAULT '',
+        country TEXT NOT NULL DEFAULT '',
+        country_code TEXT NOT NULL DEFAULT '',
+        city TEXT NOT NULL DEFAULT '',
+        lat REAL NOT NULL DEFAULT 0,
+        lon REAL NOT NULL DEFAULT 0,
+        PRIMARY KEY (run_id, ttl)
+      );
+
+      CREATE TABLE IF NOT EXISTS trace_monitors (
+        target_ip TEXT PRIMARY KEY,
+        label TEXT NOT NULL DEFAULT '',
+        interval_sec INTEGER NOT NULL DEFAULT 300,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at_ms INTEGER NOT NULL DEFAULT 0,
+        last_run_ms INTEGER NOT NULL DEFAULT 0
+      );
+    )SQL";
+
+    if (!execLocked(m3, outError)) {
+      std::string dummy;
+      execLocked("ROLLBACK;", dummy);
+      return false;
+    }
+
+    SqliteStmt ins3(db_, "INSERT INTO schema_migrations(version, name, applied_at_ms) VALUES(3, '003_traceroute_history', ?);");
+    ins3.bindInt64(1, static_cast<int64_t>(nowEpochMs()));
+    if (!ins3.stepDone()) {
+      outError = sqlite3_errmsg(db_);
+      std::string dummy;
+      execLocked("ROLLBACK;", dummy);
+      return false;
+    }
+
+    if (!execLocked("COMMIT;", outError)) return false;
+  }
+
+  if (currentVer < 4) {
+    if (!execLocked("BEGIN IMMEDIATE;", outError)) return false;
+    const char* m4 = R"SQL(
+      CREATE TABLE IF NOT EXISTS interface_samples (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts_ms INTEGER NOT NULL,
+        if_id TEXT NOT NULL,
+        if_name TEXT NOT NULL DEFAULT '',
+        if_type TEXT NOT NULL DEFAULT 'other',
+        oper_status TEXT NOT NULL DEFAULT 'unknown',
+        is_default_route INTEGER NOT NULL DEFAULT 0,
+        link_speed_bps INTEGER NOT NULL DEFAULT 0,
+        rx_bps REAL NOT NULL DEFAULT 0,
+        tx_bps REAL NOT NULL DEFAULT 0,
+        rx_bytes INTEGER NOT NULL DEFAULT 0,
+        tx_bytes INTEGER NOT NULL DEFAULT 0,
+        rx_errors INTEGER NOT NULL DEFAULT 0,
+        tx_errors INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_iface_id_ts ON interface_samples(if_id, ts_ms DESC);
+      CREATE INDEX IF NOT EXISTS idx_iface_ts ON interface_samples(ts_ms DESC);
+    )SQL";
+
+    if (!execLocked(m4, outError)) {
+      std::string dummy;
+      execLocked("ROLLBACK;", dummy);
+      return false;
+    }
+
+    SqliteStmt ins4(db_, "INSERT INTO schema_migrations(version, name, applied_at_ms) VALUES(4, '004_interfaces_multiwan', ?);");
+    ins4.bindInt64(1, static_cast<int64_t>(nowEpochMs()));
+    if (!ins4.stepDone()) {
+      outError = sqlite3_errmsg(db_);
+      std::string dummy;
+      execLocked("ROLLBACK;", dummy);
+      return false;
+    }
+
+    if (!execLocked("COMMIT;", outError)) return false;
+  }
+
   return true;
 }
 

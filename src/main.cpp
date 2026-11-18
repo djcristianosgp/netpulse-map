@@ -333,14 +333,17 @@ int main(int argc, char** argv) {
   netpulse::ServiceMonitor serviceMon(dataDir / "custom_services.tsv");
   serviceMon.start();
 
-  netpulse::TracerouteService tracer(geoDns);
   netpulse::SettingsStore settingsStore(dataDir / "settings.tsv");
   const auto initCfg = settingsStore.get();
   netpulse::setMinimizeToTrayEnabled(initCfg.minimizeToTray);
 
   netpulse::HistoryStore history(dataDir);
+  netpulse::TracerouteService tracer(geoDns, &history);
+  tracer.startScheduler();
   netpulse::NetworkQualityEngine qualityEngine(history);
   qualityEngine.start();
+  netpulse::InterfaceMonitor ifaceMonitor(&history);
+  ifaceMonitor.collect(nowMs());
   auto syncHistoryNotifications = [&](const netpulse::AppSettings& cfg) {
     history.setAlertsEnabled(cfg.alertsEnabled);
     history.setNotificationCategories(netpulse::NotificationCategories{
@@ -403,6 +406,7 @@ int main(int argc, char** argv) {
         }).detach();
       },
       &qualityEngine,
+      &ifaceMonitor,
   });
 
   const uint64_t startMs = nowMs();
@@ -501,11 +505,17 @@ int main(int argc, char** argv) {
 
   std::jthread pollThread([&](std::stop_token st) {
     uint64_t lastIdleSerializeMs = nowMs();
+    uint64_t lastIfaceCollectMs = lastIdleSerializeMs;
     while (gRunning.load() && !st.stop_requested()) {
       const uint64_t tickStart = nowMs();
       auto snap = monitor.poll(tickStart);
       snap.hostGeo = geoDns.getHostGeo();
       lastPollUs.store(snap.pollLatencyUs);
+
+      if (tickStart - lastIfaceCollectMs >= 2000) {
+        ifaceMonitor.collect(tickStart);
+        lastIfaceCollectMs = tickStart;
+      }
 
       std::vector<std::string> pubs;
       pubs.reserve(snap.publicConnections);

@@ -25,6 +25,7 @@ inline int closesocket(int s) { return ::close(s); }
 #include "../src/history_store.hpp"
 #include "../src/mmdb_reader.hpp"
 #include "../src/net_monitor.hpp"
+#include "../src/network/interface_monitor.hpp"
 #include "../src/quality/network_quality_engine.hpp"
 #include "../src/security/audit_log.hpp"
 #include "../src/security/auth_manager.hpp"
@@ -328,10 +329,11 @@ int testLiveSecurityHttpAndWsIntegration() {
   RateLimiter authLimiter(10, 60000, 60000);
   GeoDnsService geoDns(tempRoot / "data" / "geo.tsv");
   ServiceMonitor svcMon(tempRoot / "data" / "svc.tsv");
-  TracerouteService tracer(geoDns);
   SettingsStore settings(tempRoot / "data" / "settings.tsv");
   HistoryStore history(tempRoot / "data");
+  TracerouteService tracer(geoDns, &history);
   NetworkQualityEngine quality(history);
+  InterfaceMonitor ifMon(&history);
   UpdateManager updater("1.3.0", nullptr);
 
   std::string snapJson = serializeSnapshotJson(snap, geoDns, 1000, 0, &svcMon);
@@ -339,7 +341,7 @@ int testLiveSecurityHttpAndWsIntegration() {
       auth, audit, authLimiter, svcMon, tracer, settings, history, updater,
       tempRoot / "data", false, false,
       [&]() { return snapJson; },
-      nullptr, nullptr, &quality,
+      nullptr, nullptr, &quality, &ifMon,
   });
 
   WsServer server(0, tempRoot / "static", tempRoot / "assets");
@@ -585,6 +587,76 @@ int testLiveSecurityHttpAndWsIntegration() {
           "\r\nX-CSRF-Token: " + admCsrf +
           "\r\nContent-Length: " + std::to_string(delNoConfBody.size()) + "\r\n\r\n" + delNoConfBody);
   CHECK(delNoConfResp.find("confirmation_required") != std::string::npos);
+
+  // 14. Fase 3 Advanced Traceroute history, diff & monitor endpoints + RBAC + confirm guard
+  std::string thResp = sendRawHttp(
+      port,
+      "GET /api/v1/trace/history?limit=10 HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nAuthorization: Bearer np_adm_integration_secret_987654\r\n\r\n");
+  CHECK(thResp.find("200 OK") != std::string::npos);
+  CHECK(thResp.find("\"runs\":") != std::string::npos);
+
+  const std::string monBody = R"({"targetIp":"1.1.1.1","label":"Cloudflare","intervalSec":120,"enabled":true})";
+  std::string viewerAddMon = sendRawHttp(
+      port,
+      "POST /api/v1/trace/monitors HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nCookie: np_session=" + viewerCookie +
+          "\r\nX-CSRF-Token: " + viewerCsrf +
+          "\r\nContent-Length: " + std::to_string(monBody.size()) + "\r\n\r\n" + monBody);
+  CHECK(viewerAddMon.find("403 Forbidden") != std::string::npos);
+
+  std::string admAddMon = sendRawHttp(
+      port,
+      "POST /api/v1/trace/monitors HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nCookie: np_session=" + admCookie +
+          "\r\nX-CSRF-Token: " + admCsrf +
+          "\r\nContent-Length: " + std::to_string(monBody.size()) + "\r\n\r\n" + monBody);
+  CHECK(admAddMon.find("200 OK") != std::string::npos);
+  CHECK(admAddMon.find("1.1.1.1") != std::string::npos);
+
+  const std::string monDelNoConf = R"({"targetIp":"1.1.1.1"})";
+  std::string monDelNoConfResp = sendRawHttp(
+      port,
+      "POST /api/v1/trace/monitors/delete HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nCookie: np_session=" + admCookie +
+          "\r\nX-CSRF-Token: " + admCsrf +
+          "\r\nContent-Length: " + std::to_string(monDelNoConf.size()) + "\r\n\r\n" + monDelNoConf);
+  CHECK(monDelNoConfResp.find("confirmation_required") != std::string::npos);
+
+  std::string tDiffNoRuns = sendRawHttp(
+      port,
+      "GET /api/v1/trace/diff?targetIp=1.1.1.1 HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nAuthorization: Bearer np_adm_integration_secret_987654\r\n\r\n");
+  CHECK(tDiffNoRuns.find("200 OK") != std::string::npos);
+
+  // 15. Fase 4 Multi-WAN & Interfaces endpoints + RBAC
+  std::string viewerIfRefresh = sendRawHttp(
+      port,
+      "POST /api/v1/interfaces/refresh HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nCookie: np_session=" + viewerCookie +
+          "\r\nX-CSRF-Token: " + viewerCsrf + "\r\nContent-Length: 0\r\n\r\n");
+  CHECK(viewerIfRefresh.find("403 Forbidden") != std::string::npos);
+
+  std::string admIfRefresh = sendRawHttp(
+      port,
+      "POST /api/v1/interfaces/refresh HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nCookie: np_session=" + admCookie +
+          "\r\nX-CSRF-Token: " + admCsrf + "\r\nContent-Length: 0\r\n\r\n");
+  CHECK(admIfRefresh.find("200 OK") != std::string::npos);
+  CHECK(admIfRefresh.find("\"interfaces\":") != std::string::npos);
+
+  std::string ifGet = sendRawHttp(
+      port,
+      "GET /api/v1/interfaces HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nAuthorization: Bearer np_adm_integration_secret_987654\r\n\r\n");
+  CHECK(ifGet.find("200 OK") != std::string::npos);
+
+  std::string ifHist = sendRawHttp(
+      port,
+      "GET /api/v1/interfaces/history?id=if-1&range=15m HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nAuthorization: Bearer np_adm_integration_secret_987654\r\n\r\n");
+  CHECK(ifHist.find("200 OK") != std::string::npos);
+  CHECK(ifHist.find("\"series\":") != std::string::npos);
 
   server.stop();
   std::filesystem::remove_all(tempRoot, ec);
@@ -880,7 +952,7 @@ int testSqliteMigrationsAndTsvImport() {
     std::string stats = hist.getStorageStatsJson();
     CHECK(stats.find("\"journalMode\":\"wal\"") != std::string::npos);
     CHECK(stats.find("\"integrityOk\":true") != std::string::npos);
-    CHECK(stats.find("\"schemaVersion\":2") != std::string::npos);
+    CHECK(stats.find("\"schemaVersion\":4") != std::string::npos);
 
     std::string evJson = hist.getEventsJson(50, 0, "warn", "");
     CHECK(evJson.find("Legacy SSH") != std::string::npos);
@@ -1205,6 +1277,215 @@ int testNetworkQualityMathAndDiagnosis() {
   return 0;
 }
 
+int testTracerouteHistoryAndRouteDiff() {
+  // 1. Path fingerprint & diff computation
+  TraceRunRecord run1;
+  run1.id = 1;
+  run1.targetIp = "8.8.8.8";
+  run1.targetLabel = "Google DNS";
+  run1.totalRttMs = 15.0;
+  run1.hops = {
+      {1, false, "192.168.1.1", 1.2, "", "", "", "", "", 0.0, 0.0},
+      {2, false, "10.10.0.1", 5.5, "", "AS111", "", "", "", 0.0, 0.0},
+      {3, false, "8.8.8.8", 15.0, "dns.google", "AS15169", "United States", "US", "Mountain View", 37.4, -122.0},
+  };
+  run1.pathHash = computeTracePathHash(run1.hops);
+  CHECK(run1.pathHash.size() == 16);
+
+  TraceRunRecord run1Clone = run1;
+  run1Clone.hops[1].rttMs = 9.0; // jitter only, identical hop IPs -> identical pathHash
+  CHECK(computeTracePathHash(run1Clone.hops) == run1.pathHash);
+
+  auto sameDiff = computeTraceRouteDiff(run1, run1Clone);
+  CHECK(!sameDiff.pathChanged);
+  CHECK(sameDiff.changedHopsCount == 0);
+
+  TraceRunRecord run2;
+  run2.id = 2;
+  run2.targetIp = "8.8.8.8";
+  run2.targetLabel = "Google DNS";
+  run2.totalRttMs = 24.0;
+  run2.hops = {
+      {1, false, "192.168.1.1", 1.1, "", "", "", "", "", 0.0, 0.0},
+      {2, false, "172.16.4.1", 11.5, "", "AS222", "", "", "", 0.0, 0.0},
+      {3, true, "", 0.0, "", "", "", "", "", 0.0, 0.0},
+      {4, false, "8.8.8.8", 24.0, "dns.google", "AS15169", "United States", "US", "Mountain View", 37.4, -122.0},
+  };
+  run2.pathHash = computeTracePathHash(run2.hops);
+  CHECK(run2.pathHash != run1.pathHash);
+
+  auto changedDiff = computeTraceRouteDiff(run1, run2);
+  CHECK(changedDiff.pathChanged);
+  CHECK(changedDiff.changedHopsCount >= 3); // TTL 2 changed, TTL 3 timeout_change, TTL 4 added
+  CHECK(changedDiff.totalRttDeltaMs > 8.5);
+  std::string diffJson = serializeTraceDiffJson(changedDiff);
+  CHECK(diffJson.find("\"pathChanged\":true") != std::string::npos);
+  CHECK(diffJson.find("\"changed\"") != std::string::npos);
+  CHECK(diffJson.find("\"added\"") != std::string::npos);
+
+  // 2. SQLite persistence, route_changed detection, monitor CRUD & retention
+  auto tDir = std::filesystem::temp_directory_path() / "netpulse_trace_sqlite_test";
+  std::error_code ec;
+  std::filesystem::remove_all(tDir, ec);
+  {
+    HistoryStore hist(tDir);
+    GeoDnsService geo(tDir / "geo.tsv");
+    TracerouteService tracer(geo, &hist);
+
+    const uint64_t nowMs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+
+    run1.startedAtMs = nowMs - 20ULL * 86400000ULL; // 20 days old (for retention test)
+    run1.completedAtMs = run1.startedAtMs + 500;
+    run1.reached = true;
+    int64_t id1 = hist.saveTraceRun(run1);
+    CHECK(id1 > 0);
+    CHECK(!run1.changedFromPrev);
+
+    run2.startedAtMs = nowMs - 5000;
+    run2.completedAtMs = nowMs - 4000;
+    run2.reached = true;
+    int64_t id2 = hist.saveTraceRun(run2);
+    CHECK(id2 > id1);
+    CHECK(run2.changedFromPrev); // Path differed from run1!
+
+    hist.flushNow();
+    std::string evJson = hist.getEventsJson(50, 0, "", "route_changed");
+    CHECK(evJson.find("Variação de rota detectada") != std::string::npos);
+
+    std::string hJson = tracer.getHistoryJson("8.8.8.8", 10);
+    CHECK(hJson.find("AS15169") != std::string::npos);
+    CHECK(hJson.find("\"changedFromPrev\":true") != std::string::npos);
+
+    std::string autoDiff = tracer.getDiffJson(0, 0, "8.8.8.8");
+    CHECK(autoDiff.find("\"pathChanged\":true") != std::string::npos);
+
+    CHECK(tracer.upsertMonitor("8.8.8.8", "Google DNS", 120, true));
+    std::string mJson = tracer.getMonitorsJson();
+    CHECK(mJson.find("8.8.8.8") != std::string::npos);
+    CHECK(tracer.removeMonitor("8.8.8.8"));
+
+    // Prune with 7d retention -> removes old run1 (20d old), preserves run2
+    hist.setRetentionConfig(7, 128);
+    CHECK(hist.pruneNow());
+    auto remaining = hist.loadTraceRuns("8.8.8.8", 10);
+    CHECK(remaining.size() == 1);
+    CHECK(remaining[0].id == id2);
+
+    hist.stop();
+  }
+  std::filesystem::remove_all(tDir, ec);
+
+  std::cout << "[PASS] testTracerouteHistoryAndRouteDiff\n";
+  return 0;
+}
+
+int testMultiWanAndInterfaces() {
+  // 1. Deterministic type classification
+  CHECK(classifyInterfaceType(24, "Loopback Pseudo-Interface 1", "", false) == "loopback");
+  CHECK(classifyInterfaceType(71, "Wi-Fi", "Intel(R) Wi-Fi 6 AX201", true) == "wifi");
+  CHECK(classifyInterfaceType(6, "Ethernet", "Realtek PCIe GbE Family Controller", true) == "ethernet");
+  CHECK(classifyInterfaceType(53, "wg0", "WireGuard Tunnel", false) == "vpn");
+  CHECK(classifyInterfaceType(6, "vEthernet (Default Switch)", "Hyper-V Virtual Ethernet Adapter", false) == "virtual");
+  CHECK(classifyInterfaceType(131, "teredo", "Microsoft Teredo Tunneling", false) == "tunnel");
+
+  // 2. MAC formatting
+  const uint8_t mac[6] = {0x00, 0x1A, 0x2B, 0x3C, 0x4D, 0x5E};
+  CHECK(formatMacAddress(mac, 6) == "00:1A:2B:3C:4D:5E");
+  const uint8_t zeroMac[6] = {0, 0, 0, 0, 0, 0};
+  CHECK(formatMacAddress(zeroMac, 6).empty());
+
+  // 3. Rate computation + counter reset resilience
+  InterfaceRatePrev prev{};
+  NetworkInterfaceInfo cur;
+  cur.rxBytes = 10000;
+  cur.txBytes = 5000;
+  cur.rxPackets = 100;
+  cur.txPackets = 50;
+  computeInterfaceRates(prev, cur, 1000);
+  CHECK(cur.rxBps == 0.0);
+
+  cur.rxBytes = 30000;
+  cur.txBytes = 15000;
+  cur.rxPackets = 200;
+  cur.txPackets = 100;
+  computeInterfaceRates(prev, cur, 3000); // dt = 2s -> 10KB/s RX, 5KB/s TX, 50/25 pps
+  CHECK(cur.rxBps > 9999.0 && cur.rxBps < 10001.0);
+  CHECK(cur.txBps > 4999.0 && cur.txBps < 5001.0);
+  CHECK(cur.rxPps > 49.9 && cur.rxPps < 50.1);
+  CHECK(cur.txPps > 24.9 && cur.txPps < 25.1);
+
+  // Counter reset (cur < prev) must NOT underflow into giant values
+  cur.rxBytes = 100;
+  computeInterfaceRates(prev, cur, 5000);
+  CHECK(cur.rxBps == 0.0);
+
+  // 4. Multi-WAN transition detection
+  InterfaceInventorySnapshot s1, s2;
+  s1.primaryIfId = "if-1";
+  s1.primaryIfName = "Ethernet WAN1";
+  s1.primaryGateway = "192.168.1.1";
+  s1.interfaces.push_back({"if-1", 1, "Ethernet WAN1", "", "ethernet", "", "up", true, true, true, true});
+  s1.interfaces.push_back({"if-2", 2, "LTE Failover", "", "ethernet", "", "down", false, true, false, true});
+
+  s2.primaryIfId = "if-2";
+  s2.primaryIfName = "LTE Failover";
+  s2.primaryGateway = "10.0.0.1";
+  s2.interfaces.push_back({"if-1", 1, "Ethernet WAN1", "", "ethernet", "", "down", false, true, false, true});
+  s2.interfaces.push_back({"if-2", 2, "LTE Failover", "", "ethernet", "", "up", true, true, true, true});
+
+  auto events = detectMultiWanTransitions(s1, s2);
+  auto hasKind = [&](const std::string& k) {
+    for (const auto& e : events) {
+      if (e.kind == k) return true;
+    }
+    return false;
+  };
+  CHECK(hasKind("wan_primary_changed"));
+  CHECK(hasKind("interface_down"));
+  CHECK(hasKind("interface_up"));
+
+  // 5. Live OS collection + SQLite history & retention
+  auto ifDir = std::filesystem::temp_directory_path() / "netpulse_iface_sqlite_test";
+  std::error_code ec;
+  std::filesystem::remove_all(ifDir, ec);
+  {
+    HistoryStore hist(ifDir);
+    InterfaceMonitor mon(&hist);
+
+    const uint64_t nowMs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+
+    auto liveSnap = mon.collect(nowMs);
+    CHECK(!liveSnap.interfaces.empty());
+
+    // Enqueue aged (20d old) and recent sample for retention validation
+    hist.enqueueInterfaceSamples({
+        {nowMs - 20ULL * 86400000ULL, "test-eth", "eth0", "ethernet", "up", true, 1000000000ULL, 1000.0, 500.0, 1000, 500, 0, 0},
+        {nowMs - 5000ULL, "test-eth", "eth0", "ethernet", "up", true, 1000000000ULL, 2000.0, 1000.0, 3000, 1500, 1, 0},
+    });
+    hist.flushNow();
+
+    std::string hJson = hist.queryInterfaceHistoryJson("test-eth", "1h");
+    CHECK(hJson.find("2000.0") != std::string::npos);
+
+    hist.setRetentionConfig(7, 128);
+    CHECK(hist.pruneNow());
+    std::string allAfter = hist.queryInterfaceHistoryJson("test-eth", "30d");
+    CHECK(allAfter.find("1000.0") == std::string::npos);
+    CHECK(allAfter.find("2000.0") != std::string::npos);
+    hist.stop();
+  }
+  std::filesystem::remove_all(ifDir, ec);
+
+  std::cout << "[PASS] testMultiWanAndInterfaces\n";
+  return 0;
+}
+
 int main() {
 #ifdef _WIN32
   WSADATA wsa{};
@@ -1227,6 +1508,8 @@ int main() {
   rc |= testSqliteMigrationsAndTsvImport();
   rc |= testHistoryAnalyticsAndRetention();
   rc |= testNetworkQualityMathAndDiagnosis();
+  rc |= testTracerouteHistoryAndRouteDiff();
+  rc |= testMultiWanAndInterfaces();
 
 #ifdef _WIN32
   WSACleanup();

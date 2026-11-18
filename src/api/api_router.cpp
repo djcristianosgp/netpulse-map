@@ -439,7 +439,8 @@ HttpResponse ApiRouter::handleHttp(const HttpRequest& req) {
       return jsonError(400, "invalid_json", parseErr);
     }
     std::string ip = body.getString("ip");
-    if (!isValidIpAddress(ip) || !deps_.tracer.startTrace(ip)) {
+    std::string label = body.getString("label");
+    if (!isValidIpAddress(ip) || !deps_.tracer.startTrace(ip, label)) {
       return jsonError(400, "invalid_ip");
     }
     deps_.audit.record(auth.actor, roleToString(auth.role), req.remoteIp,
@@ -452,6 +453,90 @@ HttpResponse ApiRouter::handleHttp(const HttpRequest& req) {
     auto err = requireAuth(req, Role::Viewer, auth);
     if (err.statusCode != 200) return err;
     return HttpResponse{200, "application/json; charset=utf-8", deps_.tracer.getStatusJson(), {}};
+  }
+
+  if (path == "/api/trace/history" && method == "GET") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Viewer, auth);
+    if (err.statusCode != 200) return err;
+    std::string targetIp = req.queryParam("targetIp");
+    int lim = std::atoi(req.queryParam("limit").c_str());
+    size_t limit = lim > 0 ? static_cast<size_t>(std::clamp(lim, 1, 100)) : 30;
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        deps_.tracer.getHistoryJson(targetIp, limit), {}};
+  }
+
+  if (path == "/api/trace/diff" && method == "GET") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Viewer, auth);
+    if (err.statusCode != 200) return err;
+    int64_t runA = std::strtoll(req.queryParam("runA").c_str(), nullptr, 10);
+    int64_t runB = std::strtoll(req.queryParam("runB").c_str(), nullptr, 10);
+    std::string targetIp = req.queryParam("targetIp");
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        deps_.tracer.getDiffJson(runA, runB, targetIp), {}};
+  }
+
+  if (path == "/api/trace/monitors" && method == "GET") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Viewer, auth);
+    if (err.statusCode != 200) return err;
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        deps_.tracer.getMonitorsJson(), {}};
+  }
+
+  if (path == "/api/trace/monitors" && method == "POST") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Operator, auth, "trace.monitor_upserted");
+    if (err.statusCode != 200) return err;
+
+    JsonValue body;
+    std::string parseErr;
+    if (!JsonValue::parse(req.body, body, parseErr) || !body.isObject()) {
+      return jsonError(400, "invalid_json", parseErr);
+    }
+    const std::string ip = body.getString("targetIp");
+    const std::string label = body.getString("label");
+    const int intervalSec = static_cast<int>(std::clamp<int64_t>(body.getInt("intervalSec", 300), 30, 3600));
+    const bool enabled = body.getBool("enabled", true);
+    if (!isValidIpAddress(ip) || !deps_.tracer.upsertMonitor(ip, label, intervalSec, enabled)) {
+      return jsonError(400, "invalid_ip");
+    }
+    deps_.audit.record(auth.actor, roleToString(auth.role), req.remoteIp,
+                       "trace.monitor_upserted", ip, "allowed",
+                       std::string(enabled ? "enabled" : "paused") + ", interval=" + std::to_string(intervalSec) + "s");
+    return HttpResponse{200, "application/json; charset=utf-8", deps_.tracer.getMonitorsJson(), {}};
+  }
+
+  if ((path == "/api/trace/monitors/delete" && method == "POST") ||
+      (path == "/api/trace/monitors" && method == "DELETE")) {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Operator, auth, "trace.monitor_removed");
+    if (err.statusCode != 200) return err;
+
+    std::string ip;
+    bool confirmed = false;
+    if (method == "DELETE") {
+      ip = req.queryParam("targetIp");
+      confirmed = (req.queryParam("confirm") == "true" || req.queryParam("confirm") == "1");
+    } else {
+      JsonValue body;
+      std::string parseErr;
+      if (!JsonValue::parse(req.body, body, parseErr) || !body.isObject()) {
+        return jsonError(400, "invalid_json", parseErr);
+      }
+      ip = body.getString("targetIp");
+      confirmed = body.getBool("confirm", false);
+    }
+    if (!confirmed) {
+      return jsonError(400, "confirmation_required", "Confirmacao explicita obrigatoria");
+    }
+    if (!isValidIpAddress(ip) || !deps_.tracer.removeMonitor(ip)) {
+      return jsonError(404, "monitor_not_found");
+    }
+    deps_.audit.record(auth.actor, roleToString(auth.role), req.remoteIp,
+                       "trace.monitor_removed", ip, "allowed", "Monitoramento de rota removido");
+    return HttpResponse{200, "application/json; charset=utf-8", deps_.tracer.getMonitorsJson(), {}};
   }
 
   if (path == "/api/history/events" && method == "GET") {
@@ -682,6 +767,36 @@ HttpResponse ApiRouter::handleHttp(const HttpRequest& req) {
                        "quality.target_removed", id, "allowed", "Alvo removido");
     return HttpResponse{200, "application/json; charset=utf-8",
                         deps_.quality->getStatusJson(), {}};
+  }
+
+  // ---- Fase 4: Multi-WAN & Network Interfaces ----
+  if (path == "/api/interfaces" && method == "GET") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Viewer, auth);
+    if (err.statusCode != 200) return err;
+    if (!deps_.interfaces) return jsonError(503, "interfaces_unavailable");
+    return HttpResponse{200, "application/json; charset=utf-8", deps_.interfaces->getSnapshotJson(), {}};
+  }
+
+  if (path == "/api/interfaces/history" && method == "GET") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Viewer, auth);
+    if (err.statusCode != 200) return err;
+    std::string id = req.queryParam("id");
+    std::string range = req.queryParam("range");
+    if (range.empty()) range = "1h";
+    if (id.empty()) return jsonError(400, "missing_interface_id");
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        deps_.history.queryInterfaceHistoryJson(id, range), {}};
+  }
+
+  if (path == "/api/interfaces/refresh" && method == "POST") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Operator, auth, "interfaces.refresh");
+    if (err.statusCode != 200) return err;
+    if (!deps_.interfaces) return jsonError(503, "interfaces_unavailable");
+    deps_.interfaces->collect(nowEpochMs());
+    return HttpResponse{200, "application/json; charset=utf-8", deps_.interfaces->getSnapshotJson(), {}};
   }
 
   if (path == "/api/alerts/toggle" && method == "POST") {

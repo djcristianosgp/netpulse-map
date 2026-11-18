@@ -70,6 +70,16 @@ const state = {
     selectedTargetId: null,
     timer: null,
   },
+  trace: {
+    tab: 'history',
+    runs: [],
+  },
+  interfaces: {
+    range: '1h',
+    filter: 'all',
+    selectedId: null,
+    timer: null,
+  },
   auth: {
     authenticated: false,
     role: 'none',
@@ -841,14 +851,18 @@ async function startVisualTraceroute(targetIp, hostDiv) {
       mapCanvas.setTraceRoute(tr.targetIp, geoHops);
 
       hostDiv.innerHTML = `
-        <div class="insp-section-title" style="display:flex;justify-content:space-between;align-items:center">
-          <span>Rota ICMP (${tr.running ? 'rastreando...' : 'concluído'})</span>
-          <button class="svc-del-btn" id="btnClearTrace">Limpar</button>
+        <div class="insp-section-title" style="display:flex;justify-content:space-between;align-items:center;gap:4px">
+          <span>Rota ICMP (${tr.running ? 'rastreando...' : 'concluído'})${tr.changedFromPrev ? ' · <strong style="color:#fbbf24">ALTERADA</strong>' : ''}</span>
+          <div style="display:flex;gap:4px">
+            <button class="svc-del-btn" id="btnTraceHistOpen">Histórico</button>
+            <button class="svc-del-btn" id="btnClearTrace">Limpar</button>
+          </div>
         </div>
         <div>
           ${hops
             .map((h) => {
-              const place = h.geo ? `${h.geo.city ? h.geo.city + ', ' : ''}${h.geo.cc}` : h.host || '';
+              const geoTxt = h.geo ? `${h.geo.city ? h.geo.city + ', ' : ''}${h.geo.cc}${h.geo.asn ? ' · ' + h.geo.asn : ''}` : '';
+              const place = [h.host, geoTxt].filter(Boolean).join(' · ');
               return `
                 <div class="hop-row">
                   <span class="hop-ttl">#${h.ttl}</span>
@@ -862,6 +876,10 @@ async function startVisualTraceroute(targetIp, hostDiv) {
             .join('')}
         </div>
       `;
+      const thBtn = $('btnTraceHistOpen');
+      if (thBtn) {
+        thBtn.onclick = () => openTraceModal(tr.targetIp);
+      }
       const clr = $('btnClearTrace');
       if (clr) {
         clr.onclick = () => {
@@ -1457,7 +1475,11 @@ async function init() {
   window.addEventListener('keydown', (e) => {
     const inInput = document.activeElement === $('searchInput');
     if (e.key === 'Escape') {
-      if (!$('qualityModal').classList.contains('hidden')) {
+      if (!$('interfacesModal').classList.contains('hidden')) {
+        closeInterfacesModal();
+      } else if (!$('traceModal').classList.contains('hidden')) {
+        closeTraceModal();
+      } else if (!$('qualityModal').classList.contains('hidden')) {
         closeQualityModal();
       } else if (!$('analyticsModal').classList.contains('hidden')) {
         closeAnalyticsModal();
@@ -1617,6 +1639,78 @@ async function init() {
     } catch {
       fb.textContent = 'Falha ao comunicar com o motor local.';
     }
+  });
+
+  $('btnTraceModal').addEventListener('click', () => openTraceModal());
+  $('btnCloseTraceModal').addEventListener('click', closeTraceModal);
+  $('traceModal').addEventListener('click', (e) => {
+    if (e.target === $('traceModal')) closeTraceModal();
+  });
+  document.querySelectorAll('#traceTabs .tab-btn[data-ttab]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.trace.tab = btn.getAttribute('data-ttab');
+      document.querySelectorAll('#traceTabs .tab-btn[data-ttab]').forEach((b) => {
+        b.classList.toggle('active', b.getAttribute('data-ttab') === state.trace.tab);
+      });
+      loadActiveTraceTab();
+    });
+  });
+  $('btnTraceFilterApply').addEventListener('click', loadTraceHistory);
+  $('traceFilterIp').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      loadTraceHistory();
+    }
+  });
+  $('btnTraceRunTarget').addEventListener('click', async () => {
+    const ip = $('traceFilterIp').value.trim();
+    if (!ip) return;
+    const resp = await apiFetch('/api/trace/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ip }),
+    });
+    if (resp.ok) {
+      $('traceRunsList').innerHTML = `<div class="sec-row"><span class="sec-row-meta">Traceroute iniciado para ${escHtml(ip)}... aguarde alguns segundos e clique em Filtrar.</span></div>`;
+      setTimeout(loadTraceHistory, 3500);
+    }
+  });
+  $('btnComputeTraceDiff').addEventListener('click', computeSelectedTraceDiff);
+  $('traceMonitorForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const targetIp = $('tmIpInput').value.trim();
+    const label = $('tmLabelInput').value.trim();
+    const intervalSec = Math.max(30, Math.min(3600, parseInt($('tmIntervalInput').value, 10) || 300));
+    const resp = await apiFetch('/api/trace/monitors', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetIp, label, intervalSec, enabled: true }),
+    });
+    if (resp.ok) {
+      $('tmIpInput').value = '';
+      $('tmLabelInput').value = '';
+      loadTraceMonitors();
+    }
+  });
+
+  $('btnInterfaces').addEventListener('click', openInterfacesModal);
+  $('btnCloseInterfaces').addEventListener('click', closeInterfacesModal);
+  $('interfacesModal').addEventListener('click', (e) => {
+    if (e.target === $('interfacesModal')) closeInterfacesModal();
+  });
+  $('ifaceRangeSelect').addEventListener('change', () => {
+    state.interfaces.range = $('ifaceRangeSelect').value;
+    loadInterfaceHistory();
+  });
+  $('ifaceFilterSelect').addEventListener('change', () => {
+    state.interfaces.filter = $('ifaceFilterSelect').value;
+    loadInterfacesData();
+  });
+  $('btnIfaceRefresh').addEventListener('click', async () => {
+    if (hasRole('operator')) {
+      await apiFetch('/api/interfaces/refresh', { method: 'POST' });
+    }
+    await loadInterfacesData();
   });
 
   $('authForm').addEventListener('submit', async (e) => {
@@ -2386,6 +2480,336 @@ async function loadQualityStatus() {
       $('qualChartTitle').textContent = `Série Histórica — ${curTarget.name} (${curTarget.host})`;
     }
     await loadQualityHistory();
+  } catch {}
+}
+
+function openTraceModal(filterIp = '') {
+  if (filterIp) $('traceFilterIp').value = filterIp;
+  $('traceModal').classList.remove('hidden');
+  loadActiveTraceTab();
+}
+
+function closeTraceModal() {
+  $('traceModal').classList.add('hidden');
+}
+
+function loadActiveTraceTab() {
+  const tab = state.trace.tab;
+  $('traceViewHistory').classList.toggle('hidden', tab !== 'history');
+  $('traceViewMonitors').classList.toggle('hidden', tab !== 'monitors');
+  const canEdit = hasRole('operator');
+  $('btnTraceRunTarget').disabled = !canEdit;
+  $('traceMonitorForm').classList.toggle('hidden', !canEdit);
+  if (tab === 'history') loadTraceHistory();
+  else loadTraceMonitors();
+}
+
+async function loadTraceHistory() {
+  const ip = $('traceFilterIp').value.trim();
+  const q = new URLSearchParams({ limit: '40' });
+  if (ip) q.set('targetIp', ip);
+  try {
+    const resp = await apiFetch(`/api/trace/history?${q.toString()}`);
+    if (!resp.ok) return;
+    const d = await resp.json();
+    const runs = d.runs || [];
+    state.trace.runs = runs;
+
+    $('traceRunsList').innerHTML = runs.length === 0
+      ? '<div class="sec-row"><span class="sec-row-meta">Nenhuma execução de traceroute salva ainda.</span></div>'
+      : runs.map((r) => `
+        <div class="sec-row">
+          <div style="min-width:0">
+            <div><strong>#${r.id} · ${escHtml(r.targetLabel || r.targetIp)}</strong> <span class="sec-row-meta">${escHtml(r.targetIp)} · ${escHtml(r.triggerKind)} · ${new Date(r.startedAt).toLocaleString('pt-BR')}</span></div>
+            <div class="sec-row-meta">${r.hopCount} saltos · RTT final ${Number(r.totalRttMs || 0).toFixed(1)}ms · hash ${escHtml(r.pathHash || '—')} · ${r.reached ? 'Destino alcançado' : 'Incompleto'}</div>
+          </div>
+          ${r.changedFromPrev ? '<span class="state-pill syn">ROTA ALTERADA</span>' : '<span class="state-pill new">ESTÁVEL</span>'}
+        </div>`).join('');
+
+    const optHtml = runs.map((r) => `<option value="${r.id}">#${r.id} · ${escHtml(r.targetIp)} (${new Date(r.startedAt).toLocaleTimeString('pt-BR')})</option>`).join('');
+    $('traceDiffRunA').innerHTML = optHtml;
+    $('traceDiffRunB').innerHTML = optHtml;
+    if (runs.length >= 2) {
+      $('traceDiffRunB').value = String(runs[0].id); // newest
+      $('traceDiffRunA').value = String(runs[1].id); // previous baseline
+      await computeSelectedTraceDiff();
+    } else {
+      $('traceDiffOutput').innerHTML = '<div class="sec-row"><span class="sec-row-meta">São necessárias pelo menos 2 execuções do mesmo destino para calcular o Route Diff.</span></div>';
+    }
+  } catch {}
+}
+
+async function computeSelectedTraceDiff() {
+  const runA = $('traceDiffRunA').value;
+  const runB = $('traceDiffRunB').value;
+  if (!runA || !runB) return;
+  try {
+    const resp = await apiFetch(`/api/trace/diff?runA=${encodeURIComponent(runA)}&runB=${encodeURIComponent(runB)}`);
+    if (!resp.ok) return;
+    const d = await resp.json();
+    if (d.error) {
+      $('traceDiffOutput').innerHTML = `<div class="sec-row"><span class="sec-row-meta">${escHtml(d.message || d.error)}</span></div>`;
+      return;
+    }
+    const header = `
+      <div class="bw-banner" style="margin-bottom:6px">
+        <span><strong>${d.pathChanged ? '⚠ Caminho alterado' : '✓ Caminho idêntico'}</strong> · ${d.changedHopsCount} saltos diferentes · Δ RTT total: ${Number(d.totalRttDeltaMs || 0) >= 0 ? '+' : ''}${Number(d.totalRttDeltaMs || 0).toFixed(1)} ms</span>
+        <span class="sec-row-meta">#${d.runAId} (${d.hopCountA} saltos) → #${d.runBId} (${d.hopCountB} saltos)</span>
+      </div>`;
+    const rows = (d.diffs || []).map((h) => {
+      const cls = (h.kind === 'changed' || h.kind === 'removed') ? 'closed' : (h.kind === 'added' || h.kind === 'timeout_change') ? 'syn' : 'new';
+      const deltaStr = `${Number(h.deltaRttMs || 0) >= 0 ? '+' : ''}${Number(h.deltaRttMs || 0).toFixed(1)}ms`;
+      return `
+        <div class="sec-row">
+          <div style="min-width:0">
+            <div><strong>TTL #${h.ttl}</strong> · ${escHtml(h.ipA || '—')} (${Number(h.rttMsA || 0).toFixed(1)}ms) → ${escHtml(h.ipB || '—')} (${Number(h.rttMsB || 0).toFixed(1)}ms)</div>
+            <div class="sec-row-meta">Δ RTT ${deltaStr}${(h.asnA || h.asnB) ? ` · ASN: ${escHtml(h.asnA || '—')} → ${escHtml(h.asnB || '—')}` : ''}</div>
+          </div>
+          <span class="state-pill ${cls}">${escHtml(h.kind)}</span>
+        </div>`;
+    }).join('');
+    $('traceDiffOutput').innerHTML = header + rows;
+  } catch {}
+}
+
+async function loadTraceMonitors() {
+  const canEdit = hasRole('operator');
+  try {
+    const resp = await apiFetch('/api/trace/monitors');
+    if (!resp.ok) return;
+    const d = await resp.json();
+    const list = d.monitors || [];
+    $('traceMonitorsList').innerHTML = list.length === 0
+      ? '<div class="sec-row"><span class="sec-row-meta">Nenhum destino com monitoramento periódico de rota configurado.</span></div>'
+      : list.map((m) => `
+        <div class="sec-row">
+          <div style="min-width:0">
+            <div><strong>${escHtml(m.label || m.targetIp)}</strong> <span class="sec-row-meta">${escHtml(m.targetIp)} · a cada ${Number(m.intervalSec)}s</span></div>
+            <div class="sec-row-meta">${m.lastRunMs ? 'Última execução: ' + new Date(m.lastRunMs).toLocaleString('pt-BR') : 'Aguardando primeira execução'} · ${m.enabled ? 'Ativo' : 'Pausado'}</div>
+          </div>
+          <div style="display:flex;gap:6px">
+            ${canEdit ? `<button type="button" class="mini-pill-btn tm-toggle" data-ip="${escHtml(m.targetIp)}" data-lbl="${escHtml(m.label)}" data-iv="${Number(m.intervalSec)}" data-en="${m.enabled ? '1' : '0'}">${m.enabled ? 'Pausar' : 'Ativar'}</button>` : ''}
+            ${canEdit ? `<button type="button" class="mini-pill-btn tm-del" data-ip="${escHtml(m.targetIp)}">✕</button>` : ''}
+          </div>
+        </div>`).join('');
+
+    document.querySelectorAll('.tm-toggle').forEach((btn) => {
+      btn.onclick = async () => {
+        await apiFetch('/api/trace/monitors', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            targetIp: btn.getAttribute('data-ip'),
+            label: btn.getAttribute('data-lbl'),
+            intervalSec: Number(btn.getAttribute('data-iv')) || 300,
+            enabled: btn.getAttribute('data-en') !== '1',
+          }),
+        });
+        loadTraceMonitors();
+      };
+    });
+
+    document.querySelectorAll('.tm-del').forEach((btn) => {
+      btn.onclick = async () => {
+        const targetIp = btn.getAttribute('data-ip');
+        if (!window.confirm(`Remover monitoramento periódico de ${targetIp}?`)) return;
+        await apiFetch('/api/trace/monitors/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ targetIp, confirm: true }),
+        });
+        loadTraceMonitors();
+      };
+    });
+  } catch {}
+}
+
+function formatLinkSpeed(bps) {
+  const n = Number(bps) || 0;
+  if (n <= 0) return '—';
+  if (n >= 1e9) return `${(n / 1e9).toFixed(n % 1e9 === 0 ? 0 : 1)} Gbps`;
+  if (n >= 1e6) return `${(n / 1e6).toFixed(0)} Mbps`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(0)} Kbps`;
+  return `${n} bps`;
+}
+
+function openInterfacesModal() {
+  $('interfacesModal').classList.remove('hidden');
+  loadInterfacesData();
+  if (state.interfaces.timer) clearInterval(state.interfaces.timer);
+  state.interfaces.timer = setInterval(() => {
+    if (!$('interfacesModal').classList.contains('hidden')) {
+      loadInterfacesData();
+    }
+  }, 3000);
+}
+
+function closeInterfacesModal() {
+  $('interfacesModal').classList.add('hidden');
+  if (state.interfaces.timer) {
+    clearInterval(state.interfaces.timer);
+    state.interfaces.timer = null;
+  }
+}
+
+function renderInterfaceHistoryChart(series) {
+  const canvas = $('ifaceHistoryChart');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  if (!series || series.length === 0) {
+    ctx.fillStyle = 'rgba(148, 163, 184, 0.72)';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Coletando amostras históricas desta interface (amostragem a cada 10s).', w / 2, h / 2);
+    return;
+  }
+
+  let maxBps = 1024;
+  for (const pt of series) {
+    maxBps = Math.max(maxBps, Number(pt.avgRxBps) || 0, Number(pt.avgTxBps) || 0);
+  }
+  maxBps *= 1.15;
+
+  const padL = 56;
+  const padR = 14;
+  const padT = 14;
+  const padB = 22;
+  const plotW = w - padL - padR;
+  const plotH = h - padT - padB;
+
+  ctx.strokeStyle = 'rgba(148, 163, 184, 0.16)';
+  ctx.lineWidth = 1;
+  for (let g = 0; g <= 3; g++) {
+    const y = padT + (plotH * g) / 3;
+    ctx.beginPath();
+    ctx.moveTo(padL, y);
+    ctx.lineTo(padL + plotW, y);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(148, 163, 184, 0.78)';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText(formatBytesPerSec(maxBps * (1 - g / 3)), padL - 5, y + 3);
+  }
+
+  const xOf = (idx) => (series.length === 1 ? padL + plotW / 2 : padL + (idx / (series.length - 1)) * plotW);
+  const yOf = (val) => padT + plotH - Math.min(1, Math.max(0, (Number(val) || 0) / maxBps)) * plotH;
+
+  ctx.strokeStyle = '#38bdf8';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  series.forEach((pt, idx) => {
+    const x = xOf(idx);
+    const y = yOf(pt.avgRxBps);
+    if (idx === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  ctx.strokeStyle = '#34d399';
+  ctx.lineWidth = 1.8;
+  ctx.beginPath();
+  series.forEach((pt, idx) => {
+    const x = xOf(idx);
+    const y = yOf(pt.avgTxBps);
+    if (idx === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  ctx.fillStyle = 'rgba(148, 163, 184, 0.78)';
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(new Date(series[0].ts).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }), padL, h - 6);
+  ctx.textAlign = 'right';
+  ctx.fillText(new Date(series[series.length - 1].ts).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }), padL + plotW, h - 6);
+}
+
+async function loadInterfaceHistory() {
+  const ifId = state.interfaces.selectedId;
+  if (!ifId) {
+    renderInterfaceHistoryChart([]);
+    return;
+  }
+  try {
+    const resp = await apiFetch(`/api/interfaces/history?id=${encodeURIComponent(ifId)}&range=${encodeURIComponent(state.interfaces.range)}`);
+    if (!resp.ok) return;
+    const d = await resp.json();
+    const s = d.series || [];
+    const peakRx = s.reduce((a, p) => Math.max(a, Number(p.maxRxBps) || 0), 0);
+    const peakTx = s.reduce((a, p) => Math.max(a, Number(p.maxTxBps) || 0), 0);
+    $('ifaceChartStats').textContent = `${s.length} pontos · Pico ↓ ${formatBytesPerSec(peakRx)} · Pico ↑ ${formatBytesPerSec(peakTx)}`;
+    renderInterfaceHistoryChart(s);
+  } catch {}
+}
+
+async function loadInterfacesData() {
+  try {
+    const resp = await apiFetch('/api/interfaces');
+    if (!resp.ok) return;
+    const d = await resp.json();
+
+    $('ifaceSummaryGrid').innerHTML = `
+      <div class="ana-kpi-card"><div class="ana-kpi-lbl">WAN Primária</div><div class="ana-kpi-val">${escHtml(d.primaryIfName || 'N/A')}</div></div>
+      <div class="ana-kpi-card"><div class="ana-kpi-lbl">Gateway Padrão</div><div class="ana-kpi-val">${escHtml(d.primaryGateway || '—')}</div></div>
+      <div class="ana-kpi-card"><div class="ana-kpi-lbl">WANs Ativas / Total</div><div class="ana-kpi-val">${Number(d.activeWanCount || 0)} / ${Number(d.wanCount || 0)}</div></div>
+      <div class="ana-kpi-card"><div class="ana-kpi-lbl">RX / TX Agregado</div><div class="ana-kpi-val">↓ ${formatBytesPerSec(d.totalRxBps)} · ↑ ${formatBytesPerSec(d.totalTxBps)}</div></div>
+    `;
+
+    const all = d.interfaces || [];
+    const filt = state.interfaces.filter;
+    const items = all.filter((i) => {
+      if (filt === 'wan') return i.isWanCandidate || i.type === 'ethernet' || i.type === 'wifi';
+      if (filt === 'vpn') return i.type === 'vpn' || i.type === 'tunnel';
+      if (filt === 'virtual') return i.type === 'virtual';
+      if (filt === 'up') return i.operStatus === 'up';
+      return true;
+    });
+
+    if (!state.interfaces.selectedId || !all.some((x) => x.id === state.interfaces.selectedId)) {
+      state.interfaces.selectedId = d.primaryIfId || (items[0] ? items[0].id : null);
+    }
+
+    $('ifaceList').innerHTML = items.length === 0
+      ? '<div class="sec-row"><span class="sec-row-meta">Nenhuma interface para este filtro.</span></div>'
+      : items.map((ifc) => {
+        const sel = ifc.id === state.interfaces.selectedId;
+        const stCls = ifc.operStatus === 'up' ? 'new' : 'closed';
+        const ips = [...(ifc.ipv4 || []), ...(ifc.ipv6 || [])].slice(0, 3).join(', ') || 'sem IP';
+        const gw = (ifc.gateways && ifc.gateways.length) ? ifc.gateways.join(', ') : '—';
+        const dns = (ifc.dnsServers && ifc.dnsServers.length) ? ifc.dnsServers.slice(0, 3).join(', ') : '—';
+        return `
+          <div class="sec-row qual-row ${sel ? 'selected' : ''}" data-ifid="${escHtml(ifc.id)}">
+            <div style="min-width:0;flex:1">
+              <div>
+                <strong>${escHtml(ifc.name)}</strong>
+                <span class="state-pill">${escHtml(String(ifc.type || '').toUpperCase())}</span>
+                ${ifc.isDefaultRoute ? '<span class="state-pill syn">WAN PRIMÁRIA</span>' : ''}
+                <span class="sec-row-meta">${escHtml(ifc.description)}</span>
+              </div>
+              <div class="sec-row-meta">IPs: ${escHtml(ips)} · GW: ${escHtml(gw)} · DNS: ${escHtml(dns)} · MAC: ${escHtml(ifc.mac || '—')} · Link: ${formatLinkSpeed(ifc.linkSpeedBps)} · MTU ${Number(ifc.mtu || 0)}</div>
+              <div class="sec-row-meta">Taxa: ↓ ${formatBytesPerSec(ifc.rxBps)} (${Number(ifc.rxPps || 0).toFixed(0)} pps) · ↑ ${formatBytesPerSec(ifc.txBps)} (${Number(ifc.txPps || 0).toFixed(0)} pps) | Total ↓ ${formatTotalBytes(ifc.rxBytes)} / ↑ ${formatTotalBytes(ifc.txBytes)} | Erros ${Number(ifc.rxErrors || 0) + Number(ifc.txErrors || 0)} · Drops ${Number(ifc.rxDiscards || 0) + Number(ifc.txDiscards || 0)}</div>
+            </div>
+            <span class="state-pill ${stCls}">${escHtml(String(ifc.operStatus || 'unknown').toUpperCase())}</span>
+          </div>`;
+      }).join('');
+
+    document.querySelectorAll('.qual-row[data-ifid]').forEach((row) => {
+      row.onclick = () => {
+        state.interfaces.selectedId = row.getAttribute('data-ifid');
+        const obj = all.find((x) => x.id === state.interfaces.selectedId);
+        if (obj) $('ifaceChartTitle').textContent = `Histórico — ${obj.name} (${obj.type})`;
+        document.querySelectorAll('.qual-row[data-ifid]').forEach((r) => r.classList.toggle('selected', r === row));
+        loadInterfaceHistory();
+      };
+    });
+
+    const curObj = all.find((x) => x.id === state.interfaces.selectedId);
+    if (curObj) $('ifaceChartTitle').textContent = `Histórico — ${curObj.name} (${curObj.type})`;
+    await loadInterfaceHistory();
   } catch {}
 }
 

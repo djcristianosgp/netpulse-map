@@ -251,11 +251,13 @@ void HistoryStore::loadCachesFromDb() {
 
 void HistoryStore::enqueueEvent(HistoryEvent ev, bool notifyTray) {
   AlertCallback cb;
+  ExternalEventHook extHook;
   {
     std::lock_guard lock(cacheMutex_);
     events_.push_front(ev);
     while (events_.size() > 400) events_.pop_back();
     cb = alertCb_;
+    extHook = externalEventHook_;
   }
   {
     std::lock_guard lock(queueMutex_);
@@ -265,6 +267,9 @@ void HistoryStore::enqueueEvent(HistoryEvent ev, bool notifyTray) {
 
   if (notifyTray && alertsEnabled_.load() && cb) {
     cb(ev.title, ev.detail, ev.severity != "info");
+  }
+  if (extHook && ev.kind != "action") {
+    extHook(ev);
   }
 }
 
@@ -835,6 +840,7 @@ bool HistoryStore::applyRetentionLocked(sqlite3* db) {
   delBefore("DELETE FROM interface_samples WHERE ts_ms < ?;");
   delBefore("DELETE FROM trace_runs WHERE started_at_ms < ?;");
   delBefore("DELETE FROM security_alerts WHERE ts_ms < ?;");
+  delBefore("DELETE FROM notification_deliveries WHERE ts_ms < ?;");
   delBefore("DELETE FROM lan_devices WHERE online = 0 AND custom_label = '' AND last_seen_ms < ?;");
   {
     SqliteStmt st(db, "DELETE FROM trace_hops WHERE run_id NOT IN (SELECT id FROM trace_runs);");
@@ -1429,6 +1435,8 @@ std::string HistoryStore::getStorageStatsJson() {
   int64_t lanDevCnt = 0;
   int64_t secAlertCnt = 0;
   int64_t secRuleCnt = 0;
+  int64_t notifChCnt = 0;
+  int64_t notifDelivCnt = 0;
   if (db_.isOpen()) {
     db_.withLock([&](sqlite3* db) {
       SqliteStmt st(db, "SELECT COUNT(*) FROM trace_runs;");
@@ -1441,6 +1449,10 @@ std::string HistoryStore::getStorageStatsJson() {
       if (st4.valid() && st4.step() == SQLITE_ROW) secAlertCnt = st4.colInt64(0);
       SqliteStmt st5(db, "SELECT COUNT(*) FROM security_rules;");
       if (st5.valid() && st5.step() == SQLITE_ROW) secRuleCnt = st5.colInt64(0);
+      SqliteStmt st6(db, "SELECT COUNT(*) FROM notification_channels;");
+      if (st6.valid() && st6.step() == SQLITE_ROW) notifChCnt = st6.colInt64(0);
+      SqliteStmt st7(db, "SELECT COUNT(*) FROM notification_deliveries;");
+      if (st7.valid() && st7.step() == SQLITE_ROW) notifDelivCnt = st7.colInt64(0);
       return true;
     });
   }
@@ -1481,6 +1493,10 @@ std::string HistoryStore::getStorageStatsJson() {
   out += std::to_string(secAlertCnt);
   out += ",\"securityRules\":";
   out += std::to_string(secRuleCnt);
+  out += ",\"notificationChannels\":";
+  out += std::to_string(notifChCnt);
+  out += ",\"notificationDeliveries\":";
+  out += std::to_string(notifDelivCnt);
   out += "}}";
   return out;
 }
@@ -2570,6 +2586,150 @@ bool HistoryStore::deleteFirewallRule(const std::string& id) {
     if (!st.stepDone()) return false;
     return sqlite3_changes(db) > 0;
   });
+}
+
+void HistoryStore::setExternalEventHook(ExternalEventHook hook) {
+  std::lock_guard lock(cacheMutex_);
+  externalEventHook_ = std::move(hook);
+}
+
+std::vector<NotificationChannelRecord> HistoryStore::loadNotificationChannels() {
+  std::vector<NotificationChannelRecord> out;
+  if (!db_.isOpen()) return out;
+  db_.withLock([&](sqlite3* db) {
+    SqliteStmt st(
+        db,
+        "SELECT id, name, kind, enabled, endpoint_url, secret_or_token, chat_id, min_severity, "
+        "categories_csv, cooldown_sec, last_sent_ms, last_status, last_error, created_at_ms "
+        "FROM notification_channels ORDER BY created_at_ms DESC;");
+    while (st.valid() && st.step() == SQLITE_ROW) {
+      NotificationChannelRecord c;
+      c.id = st.colText(0);
+      c.name = st.colText(1);
+      c.kind = st.colText(2);
+      c.enabled = (st.colInt64(3) != 0);
+      c.endpointUrl = st.colText(4);
+      c.secretOrToken = st.colText(5);
+      c.chatId = st.colText(6);
+      c.minSeverity = st.colText(7);
+      c.categoriesCsv = st.colText(8);
+      c.cooldownSec = static_cast<int>(std::clamp<int64_t>(st.colInt64(9), 0, 86400));
+      c.lastSentMs = static_cast<uint64_t>(std::max<int64_t>(0, st.colInt64(10)));
+      c.lastStatus = st.colText(11);
+      c.lastError = st.colText(12);
+      c.createdAtMs = static_cast<uint64_t>(std::max<int64_t>(0, st.colInt64(13)));
+      out.push_back(std::move(c));
+    }
+    return true;
+  });
+  return out;
+}
+
+bool HistoryStore::upsertNotificationChannel(const NotificationChannelRecord& ch) {
+  if (!db_.isOpen() || ch.id.empty() || ch.name.empty()) return false;
+  return db_.withTransaction([&](sqlite3* db) {
+    SqliteStmt st(
+        db,
+        "INSERT INTO notification_channels(id, name, kind, enabled, endpoint_url, secret_or_token, chat_id, "
+        "min_severity, categories_csv, cooldown_sec, last_sent_ms, last_status, last_error, created_at_ms) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(id) DO UPDATE SET name=excluded.name, kind=excluded.kind, enabled=excluded.enabled, "
+        "endpoint_url=excluded.endpoint_url, secret_or_token=excluded.secret_or_token, chat_id=excluded.chat_id, "
+        "min_severity=excluded.min_severity, categories_csv=excluded.categories_csv, cooldown_sec=excluded.cooldown_sec;");
+    st.bindText(1, ch.id);
+    st.bindText(2, ch.name);
+    st.bindText(3, ch.kind);
+    st.bindInt64(4, ch.enabled ? 1 : 0);
+    st.bindText(5, ch.endpointUrl);
+    st.bindText(6, ch.secretOrToken);
+    st.bindText(7, ch.chatId);
+    st.bindText(8, ch.minSeverity);
+    st.bindText(9, ch.categoriesCsv);
+    st.bindInt64(10, ch.cooldownSec);
+    st.bindInt64(11, static_cast<int64_t>(ch.lastSentMs));
+    st.bindText(12, ch.lastStatus);
+    st.bindText(13, ch.lastError);
+    st.bindInt64(14, static_cast<int64_t>(ch.createdAtMs > 0 ? ch.createdAtMs : nowEpochMs()));
+    return st.stepDone();
+  });
+}
+
+bool HistoryStore::deleteNotificationChannel(const std::string& id) {
+  if (!db_.isOpen() || id.empty()) return false;
+  return db_.withTransaction([&](sqlite3* db) {
+    SqliteStmt st(db, "DELETE FROM notification_channels WHERE id = ?;");
+    st.bindText(1, id);
+    if (!st.stepDone()) return false;
+    return sqlite3_changes(db) > 0;
+  });
+}
+
+bool HistoryStore::updateNotificationChannelStatus(const std::string& id,
+                                                   uint64_t lastSentMs,
+                                                   const std::string& status,
+                                                   const std::string& error) {
+  if (!db_.isOpen() || id.empty()) return false;
+  return db_.withTransaction([&](sqlite3* db) {
+    SqliteStmt st(db, "UPDATE notification_channels SET last_sent_ms = ?, last_status = ?, last_error = ? WHERE id = ?;");
+    st.bindInt64(1, static_cast<int64_t>(lastSentMs));
+    st.bindText(2, status);
+    st.bindText(3, error);
+    st.bindText(4, id);
+    return st.stepDone();
+  });
+}
+
+int64_t HistoryStore::saveNotificationDelivery(const NotificationDeliveryRecord& d) {
+  if (!db_.isOpen()) return 0;
+  int64_t rowId = 0;
+  db_.withTransaction([&](sqlite3* db) {
+    SqliteStmt st(
+        db,
+        "INSERT INTO notification_deliveries(ts_ms, channel_id, channel_name, event_kind, severity, title, ok, http_status, error) "
+        "VALUES(?,?,?,?,?,?,?,?,?);");
+    st.bindInt64(1, static_cast<int64_t>(d.tsMs > 0 ? d.tsMs : nowEpochMs()));
+    st.bindText(2, d.channelId);
+    st.bindText(3, d.channelName);
+    st.bindText(4, d.eventKind);
+    st.bindText(5, d.severity);
+    st.bindText(6, d.title);
+    st.bindInt64(7, d.ok ? 1 : 0);
+    st.bindInt64(8, d.httpStatus);
+    st.bindText(9, d.error);
+    if (st.stepDone()) {
+      rowId = sqlite3_last_insert_rowid(db);
+    }
+    return true;
+  });
+  return rowId;
+}
+
+std::vector<NotificationDeliveryRecord> HistoryStore::loadNotificationDeliveries(size_t limit) {
+  std::vector<NotificationDeliveryRecord> out;
+  if (!db_.isOpen()) return out;
+  db_.withLock([&](sqlite3* db) {
+    SqliteStmt st(
+        db,
+        "SELECT id, ts_ms, channel_id, channel_name, event_kind, severity, title, ok, http_status, error "
+        "FROM notification_deliveries ORDER BY ts_ms DESC LIMIT ?;");
+    st.bindInt64(1, static_cast<int64_t>(limit));
+    while (st.valid() && st.step() == SQLITE_ROW) {
+      NotificationDeliveryRecord d;
+      d.id = st.colInt64(0);
+      d.tsMs = static_cast<uint64_t>(std::max<int64_t>(0, st.colInt64(1)));
+      d.channelId = st.colText(2);
+      d.channelName = st.colText(3);
+      d.eventKind = st.colText(4);
+      d.severity = st.colText(5);
+      d.title = st.colText(6);
+      d.ok = (st.colInt64(7) != 0);
+      d.httpStatus = static_cast<int>(st.colInt64(8));
+      d.error = st.colText(9);
+      out.push_back(std::move(d));
+    }
+    return true;
+  });
+  return out;
 }
 
 } // namespace netpulse

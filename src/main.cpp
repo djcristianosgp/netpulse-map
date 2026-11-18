@@ -347,6 +347,17 @@ int main(int argc, char** argv) {
   netpulse::DiscoveryEngine discoveryEngine(history, ifaceMonitor);
   discoveryEngine.start();
   netpulse::IntelligenceEngine intelligenceEngine(history);
+  netpulse::NotificationEngine notificationEngine(history);
+  notificationEngine.start();
+  history.setExternalEventHook([&notificationEngine](const netpulse::HistoryEvent& ev) {
+    notificationEngine.notify(netpulse::NotificationEvent{
+        ev.tsMs, ev.kind, ev.severity, ev.title, ev.detail, "history_store"});
+  });
+  intelligenceEngine.setAlertEmitCallback([&notificationEngine](const netpulse::SecurityAlertRecord& a) {
+    notificationEngine.notify(netpulse::NotificationEvent{
+        a.tsMs, "security_alert", a.riskLevel, a.ruleName,
+        a.whatHappened + " (" + a.processName + " -> " + a.destination + ")", "intelligence"});
+  });
   auto syncHistoryNotifications = [&](const netpulse::AppSettings& cfg) {
     history.setAlertsEnabled(cfg.alertsEnabled);
     history.setNotificationCategories(netpulse::NotificationCategories{
@@ -429,6 +440,7 @@ int main(int argc, char** argv) {
         return netpulse::serializeLanTopologyJson(topo);
       },
       &intelligenceEngine,
+      &notificationEngine,
   });
 
   const uint64_t startMs = nowMs();
@@ -603,6 +615,9 @@ int main(int argc, char** argv) {
   serviceMon.stop();
   updater.stop();
   server.stop();
+  history.setExternalEventHook(nullptr);
+  intelligenceEngine.setAlertEmitCallback(nullptr);
+  notificationEngine.stop();
   history.stop();
   geoDns.stop();
   netpulse::releaseSingleInstance(instanceMutex);

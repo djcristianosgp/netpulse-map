@@ -102,6 +102,11 @@ Persistência da **Intelligence Determinística** e políticas/regras do **Secur
 - `security_lists`: `id` (PK), `list_kind` (`allowlist` | `blocklist`), `target_type` (`ip` | `process` | `port`), `target_value`, `reason`, `created_by`, `created_at_ms`.
 - `firewall_rules`: `id` (PK), `rule_name`, `direction` (`out` | `in`), `action` (`block` | `allow`), `protocol` (`TCP` | `UDP` | `ANY`), `remote_ip`, `remote_port`, `program_path`, `os_applied`, `enabled`, `created_by`, `created_at_ms`.
 
+### `notification_channels` & `notification_deliveries` (Migration v7)
+Persistência de canais externos e auditoria de entregas do **Notification Engine** (`schemaVersion=7`):
+- `notification_channels`: `id` (PK), `name`, `kind` (`webhook` | `discord` | `telegram`), `enabled`, `endpoint_url`, `secret_or_token` (mascarado nas APIs de leitura), `chat_id`, `min_severity`, `categories_csv`, `cooldown_sec`, `last_sent_ms`, `last_status`, `last_error`, `created_at_ms`.
+- `notification_deliveries`: `id` (PK), `ts_ms`, `channel_id`, `channel_name`, `event_kind`, `severity`, `title`, `ok`, `http_status`, `error` (`idx_notif_deliv_ts(ts_ms DESC)`). Retenção automática exclui entregas anteriores ao cutoff.
+
 ---
 
 ## 4. Pipeline Assíncrono & Política de Retenção (`src/history_store.*`)

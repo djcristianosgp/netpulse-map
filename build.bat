@@ -68,6 +68,7 @@ cl /nologo /MP /std:c++20 /O2 /EHsc /W4 /utf-8 ^
   "%ROOT%src\security\tls_context.cpp" ^
   "%ROOT%src\storage\sqlite_db.cpp" ^
   "%ROOT%src\api\api_router.cpp" ^
+  "%ROOT%src\api\prometheus_openapi.cpp" ^
   "%ROOT%src\net_monitor.cpp" ^
   "%ROOT%src\geo_dns.cpp" ^
   "%ROOT%src\ws_server.cpp" ^
@@ -82,6 +83,7 @@ cl /nologo /MP /std:c++20 /O2 /EHsc /W4 /utf-8 ^
   "%ROOT%src\discovery\discovery_engine.cpp" ^
   "%ROOT%src\discovery\topology_builder.cpp" ^
   "%ROOT%src\intelligence\intelligence_engine.cpp" ^
+  "%ROOT%src\notifications\notification_engine.cpp" ^
   "%ROOT%src\actions.cpp" ^
   "%ROOT%src\tray_host.cpp" ^
   "%ROOT%build\sqlite3.obj" ^
@@ -103,6 +105,7 @@ cl /nologo /MP /std:c++20 /O2 /EHsc /W4 /utf-8 ^
   "%ROOT%build\obj_app\tls_context.obj" ^
   "%ROOT%build\obj_app\sqlite_db.obj" ^
   "%ROOT%build\obj_app\api_router.obj" ^
+  "%ROOT%build\obj_app\prometheus_openapi.obj" ^
   "%ROOT%build\obj_app\net_monitor.obj" ^
   "%ROOT%build\obj_app\geo_dns.obj" ^
   "%ROOT%build\obj_app\ws_server.obj" ^
@@ -117,6 +120,7 @@ cl /nologo /MP /std:c++20 /O2 /EHsc /W4 /utf-8 ^
   "%ROOT%build\obj_app\discovery_engine.obj" ^
   "%ROOT%build\obj_app\topology_builder.obj" ^
   "%ROOT%build\obj_app\intelligence_engine.obj" ^
+  "%ROOT%build\obj_app\notification_engine.obj" ^
   "%ROOT%build\obj_app\actions.obj" ^
   "%ROOT%build\obj_app\tray_host.obj" ^
   "%ROOT%build\sqlite3.obj" ^

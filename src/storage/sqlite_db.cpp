@@ -582,6 +582,59 @@ bool SqliteDb::runMigrations(std::string& outError) {
     if (!execLocked("COMMIT;", outError)) return false;
   }
 
+  if (currentVer < 7) {
+    if (!execLocked("BEGIN IMMEDIATE;", outError)) return false;
+    const char* m7 = R"SQL(
+      CREATE TABLE IF NOT EXISTS notification_channels (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        endpoint_url TEXT NOT NULL DEFAULT '',
+        secret_or_token TEXT NOT NULL DEFAULT '',
+        chat_id TEXT NOT NULL DEFAULT '',
+        min_severity TEXT NOT NULL DEFAULT 'warn',
+        categories_csv TEXT NOT NULL DEFAULT '',
+        cooldown_sec INTEGER NOT NULL DEFAULT 60,
+        last_sent_ms INTEGER NOT NULL DEFAULT 0,
+        last_status TEXT NOT NULL DEFAULT '',
+        last_error TEXT NOT NULL DEFAULT '',
+        created_at_ms INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS notification_deliveries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts_ms INTEGER NOT NULL,
+        channel_id TEXT NOT NULL,
+        channel_name TEXT NOT NULL,
+        event_kind TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        title TEXT NOT NULL,
+        ok INTEGER NOT NULL DEFAULT 0,
+        http_status INTEGER NOT NULL DEFAULT 0,
+        error TEXT NOT NULL DEFAULT ''
+      );
+      CREATE INDEX IF NOT EXISTS idx_notif_deliv_ts ON notification_deliveries(ts_ms DESC);
+    )SQL";
+
+    if (!execLocked(m7, outError)) {
+      std::string dummy;
+      execLocked("ROLLBACK;", dummy);
+      return false;
+    }
+
+    SqliteStmt ins7(db_, "INSERT INTO schema_migrations(version, name, applied_at_ms) VALUES(7, '007_notifications_engine', ?);");
+    ins7.bindInt64(1, static_cast<int64_t>(nowEpochMs()));
+    if (!ins7.stepDone()) {
+      outError = sqlite3_errmsg(db_);
+      std::string dummy;
+      execLocked("ROLLBACK;", dummy);
+      return false;
+    }
+
+    if (!execLocked("COMMIT;", outError)) return false;
+  }
+
   return true;
 }
 

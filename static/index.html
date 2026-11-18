@@ -80,6 +80,7 @@
       <button class="ctrl-btn" id="btnLanTopo" title="Mapa de Topologia LAN Interativo">🕸 Topologia</button>
       <button class="ctrl-btn" id="btnIntelligence" title="Intelligence Determinística, Regras &amp; Firewall">🧠 Intelligence</button>
       <button class="ctrl-btn" id="btnAnalytics" title="Histórico &amp; Analytics SQLite">📊 Analytics</button>
+      <button class="ctrl-btn" id="btnNotifications" title="Notificações Externas (Webhook/Discord/Telegram), OpenAPI &amp; Prometheus">🔔 Notif / API</button>
       <button class="ctrl-btn" id="btnSecurity" title="Segurança, Tokens & Auditoria">🛡 <span id="authRoleBadge">...</span></button>
       <button class="ctrl-btn" id="btnSettings" title="Configurações da aplicação">⚙</button>
       <button class="ctrl-btn" id="btnMinimizeTray" title="Minimizar para a bandeja do sistema">🗕</button>
@@ -867,6 +868,71 @@
     <div id="nocTopoStage" class="noc-card hidden" style="flex:1">
       <div class="noc-card-title"><span>🕸 Topologia LAN ao Vivo (Somente Leitura)</span></div>
       <canvas id="nocTopoCanvas" width="1100" height="520" class="lan-topo-canvas" style="height:68vh"></canvas>
+    </div>
+  </div>
+
+  <!-- Notificações Externas, Prometheus & API v1 OpenAPI Modal (Fase 9) -->
+  <div id="notificationsModal" class="modal-backdrop hidden">
+    <div class="modal-card modal-card-xl glass">
+      <div class="modal-header">
+        <span class="modal-title">🔔 Notificações Externas, Prometheus &amp; API v1 OpenAPI</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <button type="button" class="ctrl-btn" id="btnNotifRefresh" style="height:28px">↻ Atualizar</button>
+          <button class="close-btn" id="btnCloseNotifications" title="Fechar (Esc)">✕</button>
+        </div>
+      </div>
+      <div class="modal-body" style="max-height:82vh;overflow-y:auto">
+        <div class="tab-bar tab-bar-3" id="notifTabs" style="margin-bottom:8px">
+          <button type="button" class="tab-btn active" data-ntab="channels">Canais (Webhook / Discord / Telegram)</button>
+          <button type="button" class="tab-btn" data-ntab="deliveries">Histórico de Envios</button>
+          <button type="button" class="tab-btn" data-ntab="api">API v1 &amp; Prometheus /metrics</button>
+        </div>
+
+        <div id="notifTabChannels" class="ana-view">
+          <form id="notifChannelForm" class="notify-group intel-grid-form">
+            <input id="ncNameInput" type="text" placeholder="Nome (ex: NOC Discord)" required />
+            <select id="ncKindInput">
+              <option value="webhook">Webhook HTTPS (HMAC)</option>
+              <option value="discord">Discord Webhook</option>
+              <option value="telegram">Telegram Bot API</option>
+            </select>
+            <input id="ncUrlInput" type="text" placeholder="URL https://... (opcional no Telegram)" />
+            <input id="ncSecretInput" type="password" placeholder="Secret HMAC / Bot Token" />
+            <input id="ncChatIdInput" type="text" placeholder="Chat ID (Telegram)" />
+            <select id="ncMinSevInput">
+              <option value="info">Mín: Info</option>
+              <option value="low">Mín: Baixo</option>
+              <option value="warn" selected>Mín: Moderado/Warn</option>
+              <option value="high">Mín: Alto</option>
+              <option value="critical">Mín: Crítico</option>
+            </select>
+            <input id="ncCooldownInput" type="number" min="0" max="86400" value="60" placeholder="Cooldown (s)" />
+            <button type="submit" class="ctrl-btn primary" style="height:28px">+ Salvar Canal</button>
+          </form>
+          <div id="notifChannelsList" class="sec-list" style="max-height:44vh"></div>
+        </div>
+
+        <div id="notifTabDeliveries" class="ana-view hidden">
+          <div id="notifDeliveriesList" class="sec-list" style="max-height:54vh"></div>
+        </div>
+
+        <div id="notifTabApi" class="ana-view hidden">
+          <div class="notify-group">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+              <strong>Prometheus Scrape Exporter (Bearer Token obrigatório)</strong>
+              <button type="button" class="ctrl-btn" id="btnCopyPromSnippet" style="height:26px">📋 Copiar scrape_configs</button>
+            </div>
+            <pre id="promPreviewPre" style="margin:6px 0 0;padding:8px;background:rgba(2,6,23,0.75);border-radius:7px;font-size:11px;max-height:160px;overflow:auto"></pre>
+          </div>
+          <div class="notify-group">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+              <strong>Especificação OpenAPI 3.0.3 (`/api/v1/openapi.json`)</strong>
+              <a href="/api/v1/openapi.json" target="_blank" rel="noopener" class="ctrl-btn" style="height:26px;text-decoration:none;display:inline-flex;align-items:center">↗ Abrir JSON</a>
+            </div>
+            <div id="openApiPathsList" class="sec-list" style="max-height:240px;margin-top:6px"></div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 

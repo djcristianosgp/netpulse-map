@@ -20,6 +20,7 @@ inline int closesocket(int s) { return ::close(s); }
 
 #include "../src/actions.hpp"
 #include "../src/api/api_router.hpp"
+#include "../src/api/prometheus_openapi.hpp"
 #include "../src/core/json_lite.hpp"
 #include "../src/discovery/discovery_engine.hpp"
 #include "../src/discovery/topology_builder.hpp"
@@ -29,6 +30,7 @@ inline int closesocket(int s) { return ::close(s); }
 #include "../src/mmdb_reader.hpp"
 #include "../src/net_monitor.hpp"
 #include "../src/network/interface_monitor.hpp"
+#include "../src/notifications/notification_engine.hpp"
 #include "../src/quality/network_quality_engine.hpp"
 #include "../src/security/audit_log.hpp"
 #include "../src/security/auth_manager.hpp"
@@ -339,6 +341,7 @@ int testLiveSecurityHttpAndWsIntegration() {
   InterfaceMonitor ifMon(&history);
   DiscoveryEngine discovery(history, ifMon);
   IntelligenceEngine intelligence(history);
+  NotificationEngine notifications(history);
   UpdateManager updater("1.3.0", nullptr);
 
   std::string snapJson = serializeSnapshotJson(snap, geoDns, 1000, 0, &svcMon);
@@ -346,7 +349,7 @@ int testLiveSecurityHttpAndWsIntegration() {
       auth, audit, authLimiter, svcMon, tracer, settings, history, updater,
       tempRoot / "data", false, false,
       [&]() { return snapJson; },
-      nullptr, nullptr, &quality, &ifMon, &discovery, nullptr, &intelligence,
+      nullptr, nullptr, &quality, &ifMon, &discovery, nullptr, &intelligence, &notifications,
   });
 
   WsServer server(0, tempRoot / "static", tempRoot / "assets");
@@ -783,6 +786,63 @@ int testLiveSecurityHttpAndWsIntegration() {
   CHECK(nocJson.get("storage") != nullptr);
   CHECK(nocJson.get("traceHistory") != nullptr);
 
+  // 20. Fase 9 Prometheus /metrics, OpenAPI v1 JSON & Notifications HTTP/RBAC
+  std::string metricsUnauth = sendRawHttp(
+      port,
+      "GET /metrics HTTP/1.1\r\nHost: " + hostHdr + "\r\n\r\n");
+  CHECK(metricsUnauth.find("401 Unauthorized") != std::string::npos);
+
+  std::string metricsResp = sendRawHttp(
+      port,
+      "GET /metrics HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nAuthorization: Bearer " + viewerTok + "\r\n\r\n");
+  CHECK(metricsResp.find("200 OK") != std::string::npos);
+  CHECK(metricsResp.find("netpulse_info{version=") != std::string::npos);
+  CHECK(metricsResp.find("netpulse_connections_active") != std::string::npos);
+
+  std::string openApiResp = sendRawHttp(
+      port,
+      "GET /api/v1/openapi.json HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nAuthorization: Bearer " + viewerTok + "\r\n\r\n");
+  CHECK(openApiResp.find("200 OK") != std::string::npos);
+  const std::string openApiBody = extractJsonBody(openApiResp);
+  JsonValue openApiJson;
+  std::string oaErr;
+  CHECK(JsonValue::parse(openApiBody, openApiJson, oaErr, 524288));
+  CHECK(openApiJson.getString("openapi") == "3.0.3");
+  CHECK(openApiBody.find("/api/v1/noc/overview") != std::string::npos);
+  CHECK(openApiBody.find("/metrics") != std::string::npos);
+
+  // Viewer cannot save notification channel (403); remote HTTP non-HTTPS rejected (400); valid HTTPS saved & secret masked
+  std::string chAdd = R"({"name":"SOC Webhook","kind":"webhook","endpointUrl":"https://hooks.example.com/np","secretOrToken":"super_secret_key_9999","minSeverity":"warn","cooldownSec":60})";
+  CHECK(sendRawHttp(
+            port,
+            "POST /api/v1/notifications/channels HTTP/1.1\r\nHost: " + hostHdr +
+                "\r\nCookie: np_session=" + viewerCookie +
+                "\r\nX-CSRF-Token: " + viewerCsrf +
+                "\r\nContent-Length: " + std::to_string(chAdd.size()) + "\r\n\r\n" + chAdd)
+            .find("403 Forbidden") != std::string::npos);
+
+  std::string chHttpRemote = R"({"name":"Insecure","kind":"webhook","endpointUrl":"http://evil.example.com/hook"})";
+  CHECK(sendRawHttp(
+            port,
+            "POST /api/v1/notifications/channels HTTP/1.1\r\nHost: " + hostHdr +
+                "\r\nCookie: np_session=" + admCookie +
+                "\r\nX-CSRF-Token: " + admCsrf +
+                "\r\nContent-Length: " + std::to_string(chHttpRemote.size()) + "\r\n\r\n" + chHttpRemote)
+            .find("invalid_notification_channel") != std::string::npos);
+
+  std::string chOkResp = sendRawHttp(
+      port,
+      "POST /api/v1/notifications/channels HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nCookie: np_session=" + admCookie +
+          "\r\nX-CSRF-Token: " + admCsrf +
+          "\r\nContent-Length: " + std::to_string(chAdd.size()) + "\r\n\r\n" + chAdd);
+  CHECK(chOkResp.find("200 OK") != std::string::npos);
+  CHECK(chOkResp.find("SOC Webhook") != std::string::npos);
+  CHECK(chOkResp.find("super_secret_key_9999") == std::string::npos);
+  CHECK(chOkResp.find("***9999") != std::string::npos);
+
   server.stop();
   std::filesystem::remove_all(tempRoot, ec);
   std::cout << "[PASS] testLiveSecurityHttpAndWsIntegration\n";
@@ -1077,7 +1137,7 @@ int testSqliteMigrationsAndTsvImport() {
     std::string stats = hist.getStorageStatsJson();
     CHECK(stats.find("\"journalMode\":\"wal\"") != std::string::npos);
     CHECK(stats.find("\"integrityOk\":true") != std::string::npos);
-    CHECK(stats.find("\"schemaVersion\":6") != std::string::npos);
+    CHECK(stats.find("\"schemaVersion\":7") != std::string::npos);
 
     std::string evJson = hist.getEventsJson(50, 0, "warn", "");
     CHECK(evJson.find("Legacy SSH") != std::string::npos);
@@ -1966,6 +2026,86 @@ int testIntelligenceAndSecurityEngine() {
   return 0;
 }
 
+int testNotificationsPrometheusAndOpenApi() {
+  // 1. Verify RFC 4231 HMAC-SHA256 test vector
+  CHECK(hmacSha256Hex("Jefe", "what do ya want for nothing?") ==
+        "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+
+  // 2. Validate SSRF / scheme enforcement & Telegram builder
+  std::string effUrl, uerr;
+  CHECK(!validateNotificationTargetUrl("webhook", "http://example.com/hook", "", "", effUrl, uerr));
+  CHECK(validateNotificationTargetUrl("webhook", "http://127.0.0.1:9999/hook", "", "", effUrl, uerr));
+  CHECK(validateNotificationTargetUrl("webhook", "https://hooks.example.com/abc", "", "", effUrl, uerr));
+  CHECK(validateNotificationTargetUrl("telegram", "", "123456:BOT_TOK", "-100998877", effUrl, uerr));
+  CHECK(effUrl == "https://api.telegram.org/bot123456:BOT_TOK/sendMessage");
+
+  // 3. Dispatch filter + cooldown logic
+  NotificationChannelRecord ch;
+  ch.id = "ch-1";
+  ch.name = "Alert Discord";
+  ch.kind = "discord";
+  ch.enabled = true;
+  ch.minSeverity = "warn";
+  ch.cooldownSec = 60;
+
+  NotificationEvent evInfo{1700000000000ULL, "service_up", "info", "Recovered", "DNS up", "netpulse"};
+  NotificationEvent evCrit{1700000100000ULL, "security_alert", "critical", "Blocklist Hit", "1.2.3.4", "intelligence"};
+  CHECK(!shouldDispatchToChannel(ch, evInfo, 0, evInfo.tsMs));
+  CHECK(shouldDispatchToChannel(ch, evCrit, 1700000000000ULL, evCrit.tsMs));
+  CHECK(!shouldDispatchToChannel(ch, evCrit, evCrit.tsMs - 15000ULL, evCrit.tsMs)); // inside cooldown
+
+  const std::string discPayload = buildNotificationPayloadJson(ch, evCrit);
+  JsonValue parsedDisc;
+  std::string derr;
+  CHECK(JsonValue::parse(discPayload, parsedDisc, derr));
+  CHECK(discPayload.find("embeds") != std::string::npos);
+
+  ch.kind = "telegram";
+  ch.chatId = "-100998877";
+  const std::string tgPayload = buildNotificationPayloadJson(ch, evCrit);
+  CHECK(JsonValue::parse(tgPayload, parsedDisc, derr));
+  CHECK(tgPayload.find("-100998877") != std::string::npos);
+
+  // 4. SQLite Migration v7 persistence + secret masking & update preservation
+  std::filesystem::path dir = std::filesystem::temp_directory_path() / "netpulse_fase9_notif_test";
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+  HistoryStore history(dir);
+  NotificationEngine engine(history);
+
+  NotificationChannelRecord in;
+  in.name = "Webhook Secreto";
+  in.kind = "webhook";
+  in.endpointUrl = "https://hooks.example.com/np";
+  in.secretOrToken = "my_top_secret_token_abcd";
+  in.minSeverity = "warn";
+  in.cooldownSec = 30;
+  NotificationChannelRecord saved;
+  std::string serr;
+  CHECK(engine.upsertChannel(in, saved, serr));
+  CHECK(saved.secretOrToken == "***abcd");
+
+  // Updating without resending secret must preserve existing secret
+  in.id = saved.id;
+  in.secretOrToken = "";
+  in.cooldownSec = 120;
+  CHECK(engine.upsertChannel(in, saved, serr));
+  CHECK(saved.secretOrToken == "***abcd");
+  CHECK(engine.getChannelsJson().find("my_top_secret_token_abcd") == std::string::npos);
+  CHECK(engine.deleteChannel(saved.id));
+
+  // 5. OpenAPI JSON parser check
+  const std::string oa = buildOpenApiV1SpecJson("1.12.0");
+  JsonValue oaVal;
+  CHECK(JsonValue::parse(oa, oaVal, derr, 524288));
+  CHECK(oaVal.getString("openapi") == "3.0.3");
+
+  history.stop();
+  std::filesystem::remove_all(dir, ec);
+  std::cout << "[PASS] testNotificationsPrometheusAndOpenApi\n";
+  return 0;
+}
+
 int main() {
 #ifdef _WIN32
   WSADATA wsa{};
@@ -1993,6 +2133,7 @@ int main() {
   rc |= testDiscoveryEngineAndOui();
   rc |= testLanTopologyBuilder();
   rc |= testIntelligenceAndSecurityEngine();
+  rc |= testNotificationsPrometheusAndOpenApi();
 
 #ifdef _WIN32
   WSACleanup();

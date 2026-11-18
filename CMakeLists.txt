@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(netpulse VERSION 1.11.0 LANGUAGES C CXX)
+project(netpulse VERSION 1.12.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,6 +17,7 @@ set(NETPULSE_CORE_SOURCES
   src/security/tls_context.cpp
   src/storage/sqlite_db.cpp
   src/api/api_router.cpp
+  src/api/prometheus_openapi.cpp
   src/net_monitor.cpp
   src/geo_dns.cpp
   src/ws_server.cpp
@@ -31,6 +32,7 @@ set(NETPULSE_CORE_SOURCES
   src/discovery/discovery_engine.cpp
   src/discovery/topology_builder.cpp
   src/intelligence/intelligence_engine.cpp
+  src/notifications/notification_engine.cpp
   src/actions.cpp
   src/tray_host.cpp
 )

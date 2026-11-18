@@ -1495,6 +1495,8 @@ async function init() {
     if (e.key === 'Escape') {
       if ($('nocOverlay') && !$('nocOverlay').classList.contains('hidden')) {
         nocController?.close();
+      } else if ($('notificationsModal') && !$('notificationsModal').classList.contains('hidden')) {
+        closeNotificationsModal();
       } else if ($('moduleDockModal') && !$('moduleDockModal').classList.contains('hidden')) {
         closeModuleDock();
       } else if (!$('intelligenceModal').classList.contains('hidden')) {
@@ -1898,6 +1900,52 @@ async function init() {
   });
   $('btnNoc').addEventListener('click', () => nocController.open(false));
 
+  $('btnNotifications').addEventListener('click', openNotificationsModal);
+  $('btnCloseNotifications').addEventListener('click', closeNotificationsModal);
+  $('notificationsModal').addEventListener('click', (e) => {
+    if (e.target === $('notificationsModal')) closeNotificationsModal();
+  });
+  $('btnNotifRefresh').addEventListener('click', loadNotificationsTab);
+  document.querySelectorAll('#notifTabs .tab-btn[data-ntab]').forEach((b) => {
+    b.addEventListener('click', () => {
+      state.notifTab = b.getAttribute('data-ntab');
+      switchNotificationsTab();
+    });
+  });
+  $('notifChannelForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const payload = {
+      name: $('ncNameInput').value.trim(),
+      kind: $('ncKindInput').value,
+      enabled: true,
+      endpointUrl: $('ncUrlInput').value.trim(),
+      secretOrToken: $('ncSecretInput').value.trim(),
+      chatId: $('ncChatIdInput').value.trim(),
+      minSeverity: $('ncMinSevInput').value,
+      cooldownSec: parseInt($('ncCooldownInput').value, 10) || 60,
+    };
+    const resp = await apiFetch('/api/notifications/channels', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (resp.ok) {
+      $('ncNameInput').value = '';
+      $('ncUrlInput').value = '';
+      $('ncSecretInput').value = '';
+      $('ncChatIdInput').value = '';
+      renderNotificationChannels(await resp.json());
+    } else {
+      const err = await resp.json().catch(() => ({}));
+      alert(err.message || err.error || 'Falha ao salvar canal (requer Administrator + URL HTTPS).');
+    }
+  });
+  $('btnCopyPromSnippet').addEventListener('click', () => {
+    const yaml = `scrape_configs:\n  - job_name: 'netpulse'\n    metrics_path: '/metrics'\n    authorization:\n      credentials: 'SEU_TOKEN_VIEWER_OU_ADMIN'\n    static_configs:\n      - targets: ['${window.location.host}']`;
+    navigator.clipboard?.writeText(yaml).catch(() => {});
+    alert('Configuração Prometheus copiada para a área de transferência!');
+  });
+
   $('authForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const token = $('authTokenInput').value.trim();
@@ -2127,6 +2175,14 @@ function renderModuleDock() {
       badge: 'SQLite WAL',
       desc: 'Top 10 apps/destinos/países, séries RX/TX e retenção configurável.',
       action: () => { closeModuleDock(); openAnalyticsModal(); },
+    },
+    {
+      id: 'notifications',
+      icon: '🔔',
+      title: 'Notificações, Prometheus & API v1',
+      badge: 'OpenAPI 3.0',
+      desc: 'Canais Webhook HMAC/Discord/Telegram, /metrics e especificação API v1.',
+      action: () => { closeModuleDock(); openNotificationsModal(); },
     },
   ];
 
@@ -3575,6 +3631,128 @@ function renderIntelligenceData(d) {
         const err = await resp.json().catch(() => ({}));
         alert(err.message || err.error || 'Falha ao remover regra.');
       }
+    });
+  });
+}
+
+function openNotificationsModal() {
+  state.notifTab = state.notifTab || 'channels';
+  $('notificationsModal').classList.remove('hidden');
+  switchNotificationsTab();
+}
+
+function closeNotificationsModal() {
+  $('notificationsModal').classList.add('hidden');
+}
+
+function switchNotificationsTab() {
+  const t = state.notifTab || 'channels';
+  document.querySelectorAll('#notifTabs .tab-btn[data-ntab]').forEach((b) => {
+    b.classList.toggle('active', b.getAttribute('data-ntab') === t);
+  });
+  $('notifTabChannels').classList.toggle('hidden', t !== 'channels');
+  $('notifTabDeliveries').classList.toggle('hidden', t !== 'deliveries');
+  $('notifTabApi').classList.toggle('hidden', t !== 'api');
+  loadNotificationsTab();
+}
+
+async function loadNotificationsTab() {
+  const t = state.notifTab || 'channels';
+  const canAdmin = hasRole('administrator');
+  if ($('notifChannelForm')) $('notifChannelForm').querySelector('button[type="submit"]').disabled = !canAdmin;
+  if (t === 'channels') {
+    const r = await apiFetch('/api/notifications/channels');
+    if (r.ok) renderNotificationChannels(await r.json());
+  } else if (t === 'deliveries') {
+    const r = await apiFetch('/api/notifications/deliveries?limit=60');
+    if (r.ok) {
+      const d = await r.json();
+      const items = d.deliveries || [];
+      $('notifDeliveriesList').innerHTML = items.length === 0
+        ? '<div class="sec-row"><span class="sec-row-meta">Nenhuma entrega registrada.</span></div>'
+        : items.map((x) => `
+          <div class="sec-row">
+            <div>
+              <span class="state-pill ${x.ok ? 'new' : 'closed'}">${x.ok ? 'HTTP ' + x.httpStatus : 'ERRO ' + x.httpStatus}</span>
+              <strong>${escHtml(x.channelName)}</strong> · ${escHtml(x.title)}
+              <div class="sec-row-meta">${escHtml(x.eventKind)} (${escHtml(x.severity)}) ${x.error ? '· ' + escHtml(x.error) : ''}</div>
+            </div>
+            <span class="sec-row-meta">${new Date(x.tsMs).toLocaleString('pt-BR')}</span>
+          </div>
+        `).join('');
+    }
+  } else if (t === 'api') {
+    const [rProm, rOpen] = await Promise.all([
+      apiFetch('/metrics'),
+      apiFetch('/api/v1/openapi.json'),
+    ]);
+    if (rProm.ok) {
+      $('promPreviewPre').textContent = await rProm.text();
+    }
+    if (rOpen.ok) {
+      const spec = await rOpen.json();
+      const entries = Object.entries(spec.paths || {});
+      $('openApiPathsList').innerHTML = entries.map(([p, ops]) => {
+        const meths = Object.entries(ops).map(([m, info]) =>
+          `<span class="state-pill">${escHtml(m.toUpperCase())}</span> ${escHtml(info.summary || '')}`
+        ).join(' ');
+        return `<div class="sec-row"><div><code>${escHtml(p)}</code></div><div>${meths}</div></div>`;
+      }).join('');
+    }
+  }
+}
+
+function renderNotificationChannels(d) {
+  const canOp = hasRole('operator');
+  const canAdmin = hasRole('administrator');
+  const list = d.channels || [];
+  $('notifChannelsList').innerHTML = list.length === 0
+    ? '<div class="sec-row"><span class="sec-row-meta">Nenhum canal Webhook/Discord/Telegram configurado.</span></div>'
+    : list.map((c) => `
+      <div class="sec-row">
+        <div style="min-width:0;flex:1">
+          <div>
+            <span class="state-pill">${escHtml(c.kind.toUpperCase())}</span>
+            <strong>${escHtml(c.name)}</strong>
+            <span class="state-pill ${c.enabled ? 'new' : 'closed'}">${c.enabled ? 'ATIVO' : 'PAUSADO'}</span>
+            ${c.hasSecret ? `<span class="state-pill">Secret ${escHtml(c.secretPreview || '***')}</span>` : ''}
+          </div>
+          <div class="sec-row-meta">${escHtml(c.endpointUrl || (c.kind === 'telegram' ? 'Telegram API (' + c.chatId + ')' : '—'))} · Mín=${escHtml(c.minSeverity)} · Cooldown=${Number(c.cooldownSec)}s · Último=${escHtml(c.lastStatus || 'nunca')} ${c.lastError ? '(' + escHtml(c.lastError) + ')' : ''}</div>
+        </div>
+        <div style="display:flex;gap:5px;flex-shrink:0">
+          ${canOp ? `<button type="button" class="mini-pill-btn n-test" data-id="${escHtml(c.id)}">▶ Testar</button>` : ''}
+          ${canAdmin ? `<button type="button" class="mini-pill-btn n-del" data-id="${escHtml(c.id)}">✕</button>` : ''}
+        </div>
+      </div>
+    `).join('');
+
+  $('notifChannelsList').querySelectorAll('.n-test').forEach((b) => {
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      const resp = await apiFetch('/api/notifications/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: b.getAttribute('data-id') }),
+      });
+      b.disabled = false;
+      if (resp.ok) alert('Notificação de teste entregue com sucesso!');
+      else {
+        const err = await resp.json().catch(() => ({}));
+        alert(`Falha no envio: ${err.message || err.error || resp.status}`);
+      }
+      loadNotificationsTab();
+    });
+  });
+
+  $('notifChannelsList').querySelectorAll('.n-del').forEach((b) => {
+    b.addEventListener('click', async () => {
+      if (!confirm('Remover canal externo de notificação?')) return;
+      const resp = await apiFetch('/api/notifications/channels/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: b.getAttribute('data-id'), confirm: true }),
+      });
+      if (resp.ok) renderNotificationChannels(await resp.json());
     });
   });
 }

@@ -6,6 +6,7 @@
 #include "../history_store.hpp"
 #include "../intelligence/intelligence_engine.hpp"
 #include "../network/interface_monitor.hpp"
+#include "../notifications/notification_engine.hpp"
 #include "../quality/network_quality_engine.hpp"
 #include "../security/audit_log.hpp"
 #include "../security/auth_manager.hpp"
@@ -51,6 +52,7 @@ struct ApiDependencies {
   DiscoveryEngine* discovery = nullptr;
   std::function<std::string()> getLanTopologyJson = nullptr;
   IntelligenceEngine* intelligence = nullptr;
+  NotificationEngine* notifications = nullptr;
 };
 
 class ApiRouter {

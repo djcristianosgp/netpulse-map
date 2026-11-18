@@ -240,12 +240,43 @@ struct FirewallRuleRecord {
   uint64_t createdAtMs = 0;
 };
 
+struct NotificationChannelRecord {
+  std::string id;
+  std::string name;
+  std::string kind = "webhook"; // "webhook" | "discord" | "telegram"
+  bool enabled = true;
+  std::string endpointUrl;
+  std::string secretOrToken;
+  std::string chatId;
+  std::string minSeverity = "warn"; // "info" | "low" | "warn" | "high" | "critical"
+  std::string categoriesCsv;
+  int cooldownSec = 60;
+  uint64_t lastSentMs = 0;
+  std::string lastStatus;
+  std::string lastError;
+  uint64_t createdAtMs = 0;
+};
+
+struct NotificationDeliveryRecord {
+  int64_t id = 0;
+  uint64_t tsMs = 0;
+  std::string channelId;
+  std::string channelName;
+  std::string eventKind;
+  std::string severity;
+  std::string title;
+  bool ok = false;
+  int httpStatus = 0;
+  std::string error;
+};
+
 bool isSensitivePort(uint16_t port);
 uint64_t rangeToDurationMs(const std::string& range);
 
 class HistoryStore {
 public:
   using AlertCallback = std::function<void(const std::string& title, const std::string& body, bool isWarning)>;
+  using ExternalEventHook = std::function<void(const HistoryEvent& ev)>;
 
   explicit HistoryStore(std::filesystem::path dataDir);
   ~HistoryStore();
@@ -255,6 +286,7 @@ public:
 
   void stop();
   void setAlertCallback(AlertCallback cb);
+  void setExternalEventHook(ExternalEventHook hook);
   void setAlertsEnabled(bool enabled) { alertsEnabled_.store(enabled); }
   bool alertsEnabled() const { return alertsEnabled_.load(); }
   void setNotificationCategories(const NotificationCategories& cats);
@@ -304,6 +336,13 @@ public:
   std::vector<FirewallRuleRecord> loadFirewallRules();
   bool upsertFirewallRule(const FirewallRuleRecord& fw);
   bool deleteFirewallRule(const std::string& id);
+
+  std::vector<NotificationChannelRecord> loadNotificationChannels();
+  bool upsertNotificationChannel(const NotificationChannelRecord& ch);
+  bool deleteNotificationChannel(const std::string& id);
+  bool updateNotificationChannelStatus(const std::string& id, uint64_t lastSentMs, const std::string& status, const std::string& error);
+  int64_t saveNotificationDelivery(const NotificationDeliveryRecord& d);
+  std::vector<NotificationDeliveryRecord> loadNotificationDeliveries(size_t limit = 80);
 
   void flushNow();
   bool pruneNow();
@@ -381,6 +420,7 @@ private:
   std::atomic<bool> alertsEnabled_{true};
   NotificationCategories categories_;
   AlertCallback alertCb_;
+  ExternalEventHook externalEventHook_;
 
   std::atomic<int> retentionDays_{30};
   std::atomic<int> maxDbSizeMb_{256};

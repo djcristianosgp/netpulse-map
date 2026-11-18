@@ -14,7 +14,7 @@ COPY third_party/ ./third_party/
 RUN mkdir -p /out && \
     gcc -O2 -DSQLITE_THREADSAFE=1 -c third_party/sqlite/sqlite3.c -o /out/sqlite3.o && \
     g++ -std=c++20 -O2 -Wall -Wextra -pthread -Isrc -Ithird_party/sqlite \
-      -DNETPULSE_VERSION=\"1.11.0\" \
+      -DNETPULSE_VERSION=\"1.12.0\" \
       src/main.cpp \
       src/core/json_lite.cpp \
       src/security/auth_manager.cpp \
@@ -23,6 +23,7 @@ RUN mkdir -p /out && \
       src/security/tls_context.cpp \
       src/storage/sqlite_db.cpp \
       src/api/api_router.cpp \
+      src/api/prometheus_openapi.cpp \
       src/net_monitor.cpp \
       src/geo_dns.cpp \
       src/ws_server.cpp \
@@ -37,6 +38,7 @@ RUN mkdir -p /out && \
       src/discovery/discovery_engine.cpp \
       src/discovery/topology_builder.cpp \
       src/intelligence/intelligence_engine.cpp \
+      src/notifications/notification_engine.cpp \
       src/actions.cpp \
       src/tray_host.cpp \
       /out/sqlite3.o \

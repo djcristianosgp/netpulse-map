@@ -1,4 +1,5 @@
 #include "api_router.hpp"
+#include "prometheus_openapi.hpp"
 #include "../actions.hpp"
 #include "../models.hpp"
 #include "../net_monitor.hpp"
@@ -1193,6 +1194,141 @@ HttpResponse ApiRouter::handleHttp(const HttpRequest& req) {
     out += ",\"traceHistory\":" + (traceJson.empty() ? "null" : traceJson);
     out += "}";
     return HttpResponse{200, "application/json; charset=utf-8", std::move(out), {}};
+  }
+
+  // ---- Fase 9: Prometheus /metrics, OpenAPI v1 & Notifications ----
+  if ((path == "/metrics" || path == "/api/metrics") && method == "GET") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Viewer, auth);
+    if (err.statusCode != 200) return err;
+    return HttpResponse{200, "text/plain; version=0.0.4; charset=utf-8",
+                        formatPrometheusMetrics(deps_), {}};
+  }
+
+  if (path == "/api/openapi.json" && method == "GET") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Viewer, auth);
+    if (err.statusCode != 200) return err;
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        buildOpenApiV1SpecJson(kAppVersion), {}};
+  }
+
+  if (path == "/api/notifications/channels" && method == "GET") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Viewer, auth);
+    if (err.statusCode != 200) return err;
+    if (!deps_.notifications) return jsonError(503, "notifications_unavailable");
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        deps_.notifications->getChannelsJson(), {}};
+  }
+
+  if ((path == "/api/notifications/channels" || path == "/api/notifications/channels/save") &&
+      method == "POST") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Administrator, auth, "notifications.channel_saved");
+    if (err.statusCode != 200) return err;
+    if (!deps_.notifications) return jsonError(503, "notifications_unavailable");
+
+    JsonValue body;
+    std::string parseErr;
+    if (!JsonValue::parse(req.body, body, parseErr) || !body.isObject()) {
+      return jsonError(400, "invalid_json", parseErr);
+    }
+
+    NotificationChannelRecord ch;
+    ch.id = body.getString("id");
+    ch.name = body.getString("name");
+    ch.kind = body.getString("kind", "webhook");
+    ch.enabled = body.getBool("enabled", true);
+    ch.endpointUrl = body.getString("endpointUrl");
+    ch.secretOrToken = body.getString("secretOrToken");
+    ch.chatId = body.getString("chatId");
+    ch.minSeverity = body.getString("minSeverity", "warn");
+    ch.categoriesCsv = body.getString("categoriesCsv");
+    ch.cooldownSec = static_cast<int>(body.getInt("cooldownSec", 60));
+
+    NotificationChannelRecord saved;
+    std::string actErr;
+    if (!deps_.notifications->upsertChannel(ch, saved, actErr)) {
+      return jsonError(400, "invalid_notification_channel", actErr);
+    }
+    deps_.audit.record(auth.actor, roleToString(auth.role), req.remoteIp,
+                       "notifications.channel_saved", saved.id, "allowed",
+                       saved.name + " (" + saved.kind + ")");
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        deps_.notifications->getChannelsJson(), {}};
+  }
+
+  if ((path == "/api/notifications/channels/delete" && method == "POST") ||
+      (path == "/api/notifications/channels" && method == "DELETE")) {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Administrator, auth, "notifications.channel_removed");
+    if (err.statusCode != 200) return err;
+    if (!deps_.notifications) return jsonError(503, "notifications_unavailable");
+
+    std::string id;
+    bool confirmed = false;
+    if (method == "DELETE") {
+      id = req.queryParam("id");
+      confirmed = (req.queryParam("confirm") == "true" || req.queryParam("confirm") == "1");
+    } else {
+      JsonValue body;
+      std::string parseErr;
+      if (!JsonValue::parse(req.body, body, parseErr) || !body.isObject()) {
+        return jsonError(400, "invalid_json", parseErr);
+      }
+      id = body.getString("id");
+      confirmed = body.getBool("confirm", false);
+    }
+    if (!confirmed) {
+      return jsonError(400, "confirmation_required", "Confirmacao explicita obrigatoria");
+    }
+    if (id.empty() || !deps_.notifications->deleteChannel(id)) {
+      return jsonError(404, "channel_not_found");
+    }
+    deps_.audit.record(auth.actor, roleToString(auth.role), req.remoteIp,
+                       "notifications.channel_removed", id, "allowed", "Canal externo removido");
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        deps_.notifications->getChannelsJson(), {}};
+  }
+
+  if (path == "/api/notifications/test" && method == "POST") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Operator, auth, "notifications.test");
+    if (err.statusCode != 200) return err;
+    if (!deps_.notifications) return jsonError(503, "notifications_unavailable");
+
+    JsonValue body;
+    std::string parseErr;
+    if (!JsonValue::parse(req.body, body, parseErr) || !body.isObject()) {
+      return jsonError(400, "invalid_json", parseErr);
+    }
+    const std::string id = body.getString("id");
+    std::string actErr;
+    const bool ok = deps_.notifications->sendTestNotification(id, actErr);
+    deps_.audit.record(auth.actor, roleToString(auth.role), req.remoteIp,
+                       "notifications.test", id, ok ? "allowed" : "failed",
+                       ok ? "Notificacao de teste enviada" : actErr);
+    if (!ok) {
+      return jsonError(400, "notification_delivery_failed", actErr);
+    }
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        deps_.notifications->getDeliveriesJson(40), {}};
+  }
+
+  if (path == "/api/notifications/deliveries" && method == "GET") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Viewer, auth);
+    if (err.statusCode != 200) return err;
+    if (!deps_.notifications) return jsonError(503, "notifications_unavailable");
+    size_t limit = 80;
+    const std::string limitStr = req.queryParam("limit");
+    if (!limitStr.empty()) {
+      const long long v = std::strtoll(limitStr.c_str(), nullptr, 10);
+      if (v > 0 && v <= 500) limit = static_cast<size_t>(v);
+    }
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        deps_.notifications->getDeliveriesJson(limit), {}};
   }
 
   if (path == "/api/alerts/toggle" && method == "POST") {

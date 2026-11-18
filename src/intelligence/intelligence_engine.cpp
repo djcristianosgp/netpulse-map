@@ -240,6 +240,11 @@ bool IntelligenceEngine::shouldEmitWithCooldownLocked(const std::string& dedupKe
   return true;
 }
 
+void IntelligenceEngine::setAlertEmitCallback(AlertEmitCallback cb) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  alertEmitCb_ = std::move(cb);
+}
+
 void IntelligenceEngine::emitAlert(const SecurityAlertRecord& alert) {
   SecurityAlertRecord persisted = alert;
   persisted.riskScore = clampScore(persisted.riskScore);
@@ -250,10 +255,17 @@ void IntelligenceEngine::emitAlert(const SecurityAlertRecord& alert) {
   const int64_t newId = history_.saveSecurityAlert(persisted);
   persisted.id = newId;
 
-  std::lock_guard<std::mutex> lock(mutex_);
-  recentAlerts_.insert(recentAlerts_.begin(), persisted);
-  if (recentAlerts_.size() > 200) {
-    recentAlerts_.resize(200);
+  AlertEmitCallback cb;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    recentAlerts_.insert(recentAlerts_.begin(), persisted);
+    if (recentAlerts_.size() > 200) {
+      recentAlerts_.resize(200);
+    }
+    cb = alertEmitCb_;
+  }
+  if (cb) {
+    cb(persisted);
   }
 }
 

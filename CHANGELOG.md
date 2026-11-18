@@ -2,6 +2,21 @@
 
 Todas as mudanças relevantes do **NetPulse** serão documentadas neste arquivo.
 
+## [1.12.0] - 2026-11-18 — Fase 9: API v1 Documentada, Prometheus & Notificações
+
+### Adicionado
+- **Notification Engine (`src/notifications/notification_engine.*`)**:
+  - Despacho assíncrono em thread dedicada (`std::jthread`) conectado automaticamente a `HistoryStore` (eventos operacionais) e `IntelligenceEngine` (alertas comportamentais).
+  - Suporte nativo a **Webhook HTTPS com assinatura HMAC-SHA256** (`X-NetPulse-Signature: sha256=...`, RFC 2104 sobre `AuthManager::sha256Hex`), **Discord Webhook** (embeds por severidade) e **Telegram Bot API** (`sendMessage`), com filtros por severidade mínima/categorias, cooldown configurável por canal, proteção SSRF/HTTPS (HTTP permitido apenas para loopback local) e mascaramento de segredos (`secretPreview`).
+- **SQLite Migration v7 (`src/storage/sqlite_db.cpp`, `src/history_store.*`)**:
+  - Tabelas `notification_channels` e `notification_deliveries` integradas à retenção e ao endpoint `/api/history/storage`.
+- **Prometheus Exporter & OpenAPI 3.0.3 (`src/api/prometheus_openapi.*`, `src/api/api_router.*`, `src/ws_server.cpp`)**:
+  - `GET /metrics` (`/api/metrics` / `/api/v1/metrics`, perfil `Viewer+`): exportação Prometheus `text/plain; version=0.0.4` cobrindo sockets ativos, NIC RX/TX, alvos Quality, interfaces Multi-WAN, Discovery LAN, serviços, risco Intelligence e entregas de notificação.
+  - `GET /api/v1/openapi.json` (`Viewer+`): especificação completa OpenAPI 3.0.3 (36 endpoints) com esquemas `bearerAuth` e `cookieAuth`.
+  - CRUD e teste de notificações (`/api/notifications/channels*`, `/api/notifications/test`, `/api/notifications/deliveries`) protegidos por RBAC/CSRF/`confirm: true`/AuditLog.
+- **Web UI (`static/index.html`, `static/app.js`)**: botão `🔔 Notif / API`, atalho no dock de módulos e modal `#notificationsModal` com gestão de canais, histórico de entregas, cópia de `scrape_configs` Prometheus e visualizador de endpoints OpenAPI.
+- **Testes (`tests/test_core.cpp`)**: `testNotificationsPrometheusAndOpenApi` (vetor RFC 4231 HMAC-SHA256, validação URL SSRF, cooldown, formatter Discord/Telegram, Migration v7 e preservação de segredo em edição) + cobertura HTTP `/metrics`, `/api/v1/openapi.json` e `/api/v1/notifications/channels`.
+
 ## [1.11.0] - 2026-11-18 — Fase 8: Dashboard Analytics & Modo NOC
 
 ### Adicionado

@@ -836,7 +836,7 @@ void WsServer::handleHttpOrWs(uintptr_t rawSock, std::string remoteIp) {
     return;
   }
 
-  if (req.path.rfind("/api/", 0) == 0 && req.path != "/api/health") {
+  if ((req.path.rfind("/api/", 0) == 0 || req.path == "/metrics") && req.path != "/api/health") {
     req.body = reqStr.substr(hdrEnd + 4);
     while (req.body.size() < contentLength) {
       int n = io->recvSome(buf, sizeof(buf));

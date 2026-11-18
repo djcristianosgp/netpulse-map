@@ -5,6 +5,7 @@
 #include "../models.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -27,8 +28,11 @@ std::string buildJsonStringArray(const std::vector<std::string>& items);
 
 class IntelligenceEngine {
 public:
+  using AlertEmitCallback = std::function<void(const SecurityAlertRecord&)>;
+
   explicit IntelligenceEngine(HistoryStore& history);
 
+  void setAlertEmitCallback(AlertEmitCallback cb);
   void processTelemetry(const TelemetrySnapshot& snap, const GeoDnsService& geoDns);
 
   std::string getOverviewJson(size_t maxAlerts = 120,
@@ -76,6 +80,7 @@ private:
 
   HistoryStore& history_;
   mutable std::mutex mutex_;
+  AlertEmitCallback alertEmitCb_;
 
   std::vector<SecurityRuleRecord> rules_;
   std::vector<SecurityListEntry> lists_;

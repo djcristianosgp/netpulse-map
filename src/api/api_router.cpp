@@ -1642,6 +1642,110 @@ HttpResponse ApiRouter::handleHttp(const HttpRequest& req) {
     return HttpResponse{200, "application/json; charset=utf-8", "{\"ok\":true}", {}};
   }
 
+  // ---- Satellite Tracking V1 ----
+  if (path == "/api/satellites" && method == "GET") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Viewer, auth);
+    if (err.statusCode != 200) return err;
+    if (!deps_.satellitePositions) {
+      return jsonError(503, "satellite_module_unavailable");
+    }
+    return HttpResponse{200, "application/json; charset=utf-8", deps_.satellitePositions->getSnapshotJson(), {}};
+  }
+
+  if (path == "/api/satellites/catalog" && method == "GET") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Viewer, auth);
+    if (err.statusCode != 200) return err;
+    if (!deps_.satelliteManager) {
+      return jsonError(503, "satellite_module_unavailable");
+    }
+    return HttpResponse{200, "application/json; charset=utf-8", deps_.satelliteManager->catalog().toCatalogJson(), {}};
+  }
+
+  if (path == "/api/satellites/config" && method == "POST") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Operator, auth, "satellite.config_updated");
+    if (err.statusCode != 200) return err;
+    if (!deps_.satelliteManager || !deps_.satellitePositions) {
+      return jsonError(503, "satellite_module_unavailable");
+    }
+
+    JsonValue body;
+    std::string parseErr;
+    if (!JsonValue::parse(req.body, body, parseErr) || !body.isObject()) {
+      return jsonError(400, "invalid_json", parseErr);
+    }
+
+    auto nextCfg = deps_.satelliteManager->config().get();
+    nextCfg.enabled = body.getBool("enabled", nextCfg.enabled);
+    nextCfg.showTrajectory = body.getBool("showTrajectory", nextCfg.showTrajectory);
+    nextCfg.pastTrackMinutes = static_cast<int>(body.getInt("pastTrackMinutes", nextCfg.pastTrackMinutes));
+    nextCfg.futureTrackMinutes = static_cast<int>(body.getInt("futureTrackMinutes", nextCfg.futureTrackMinutes));
+    nextCfg.positionIntervalMs = static_cast<int>(body.getInt("positionIntervalMs", nextCfg.positionIntervalMs));
+    nextCfg.catalogRefreshSec = static_cast<int>(body.getInt("catalogRefreshSec", nextCfg.catalogRefreshSec));
+
+    if (body.getBool("selectAll", false)) {
+      nextCfg.visibleNoradIds = deps_.satelliteManager->availableNoradIds();
+    } else if (body.getBool("deselectAll", false)) {
+      nextCfg.visibleNoradIds.clear();
+    } else if (const JsonValue* visArr = body.get("visibleNoradIds"); visArr && visArr->isArray()) {
+      nextCfg.visibleNoradIds.clear();
+      for (const auto& item : visArr->asArray()) {
+        int nid = static_cast<int>(item.asInt(0));
+        if (nid > 0) nextCfg.visibleNoradIds.push_back(nid);
+      }
+    }
+
+    if (const JsonValue* toggleId = body.get("toggleNoradId"); toggleId && toggleId->isNumber()) {
+      const int nid = static_cast<int>(toggleId->asInt(0));
+      const bool vis = body.getBool("visible", true);
+      if (nid > 0) {
+        auto it = std::find(nextCfg.visibleNoradIds.begin(), nextCfg.visibleNoradIds.end(), nid);
+        if (vis && it == nextCfg.visibleNoradIds.end()) {
+          nextCfg.visibleNoradIds.push_back(nid);
+        } else if (!vis && it != nextCfg.visibleNoradIds.end()) {
+          nextCfg.visibleNoradIds.erase(it);
+        }
+      }
+    }
+
+    std::string cfgErr;
+    if (!deps_.satelliteManager->config().update(nextCfg, cfgErr)) {
+      return jsonError(400, "invalid_satellite_config", cfgErr);
+    }
+    deps_.satellitePositions->notifyConfigChanged();
+    deps_.audit.record(auth.actor, roleToString(auth.role), req.remoteIp,
+                       "satellite.config_updated", "satellites", "allowed",
+                       "enabled=" + std::string(nextCfg.enabled ? "1" : "0") +
+                       ", count=" + std::to_string(nextCfg.visibleNoradIds.size()));
+    return HttpResponse{200, "application/json; charset=utf-8", deps_.satellitePositions->getSnapshotJson(), {}};
+  }
+
+  if (path == "/api/satellites/refresh" && method == "POST") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Operator, auth, "satellite.catalog_refresh");
+    if (err.statusCode != 200) return err;
+    if (!deps_.satellitePositions) {
+      return jsonError(503, "satellite_module_unavailable");
+    }
+
+    bool force = false;
+    if (!req.body.empty()) {
+      JsonValue body;
+      std::string parseErr;
+      if (JsonValue::parse(req.body, body, parseErr) && body.isObject()) {
+        force = body.getBool("force", false);
+      }
+    }
+    deps_.satellitePositions->requestCatalogRefreshAsync(force);
+    deps_.audit.record(auth.actor, roleToString(auth.role), req.remoteIp,
+                       "satellite.catalog_refresh", "celestrak", "allowed",
+                       force ? "forced" : "scheduled");
+    return HttpResponse{202, "application/json; charset=utf-8",
+                        "{\"ok\":true,\"status\":\"refresh_queued\"}", {}};
+  }
+
   return jsonError(404, "not_found");
 }
 

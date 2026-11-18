@@ -4,6 +4,7 @@ import {
   computeSolarTerminatorPolygon,
   findCountryAt,
 } from './topo.js';
+import { SatelliteMapOverlay } from './satellite-overlay.js';
 
 const WORLD_W = 1000;
 
@@ -110,6 +111,7 @@ export class PlanetMapCanvas {
     this.selectedServiceId = null;
     this.hoveredCountry = null;
     this.selectedCountryName = null;
+    this.satelliteOverlay = new SatelliteMapOverlay();
 
     this.isDragging = false;
     this.dragMoved = false;
@@ -393,6 +395,10 @@ export class PlanetMapCanvas {
 
   clearTraceRoute() {
     this.traceRoute = null;
+  }
+
+  updateSatellites(payload) {
+    this.satelliteOverlay.updateData(payload);
   }
 
   resize() {
@@ -708,6 +714,7 @@ export class PlanetMapCanvas {
 
     this.renderRipples(ctx);
     this.renderTraceOverlay(ctx, timeSec);
+    this.satelliteOverlay.render(ctx, this, timeSec);
 
     ctx.restore();
   }
@@ -1229,26 +1236,32 @@ export class PlanetMapCanvas {
       const ll = this.screenToLonLat(mx, my);
       this.callbacks.onCursorCoords?.(ll);
 
+      let hitSat = this.satelliteOverlay.hitTest(mx, my);
+      this.satelliteOverlay.hoveredNoradId = hitSat ? hitSat.noradId : null;
+
       let hitNode = null;
       let hitSvc = null;
-      if (this.viewMode === 'global') {
-        hitSvc = this.hitTestService(mx, my);
-      } else {
-        hitNode = this.hitTestNode(mx, my);
+      if (!hitSat) {
+        if (this.viewMode === 'global') {
+          hitSvc = this.hitTestService(mx, my);
+        } else {
+          hitNode = this.hitTestNode(mx, my);
+        }
       }
       this.hoveredNode = hitNode;
       this.hoveredService = hitSvc;
 
       let hitCountry = null;
-      if (!hitNode && !hitSvc && ll && this.features.length > 0) {
+      if (!hitSat && !hitNode && !hitSvc && ll && this.features.length > 0) {
         hitCountry = findCountryAt(this.features, ll[0], ll[1]);
       }
       this.hoveredCountry = hitCountry;
 
-      this.canvas.style.cursor = hitNode || hitSvc || hitCountry ? 'pointer' : 'grab';
+      this.canvas.style.cursor = hitSat || hitNode || hitSvc || hitCountry ? 'pointer' : 'grab';
       this.callbacks.onHover?.({
         x: e.clientX,
         y: e.clientY,
+        satellite: hitSat,
         node: hitNode,
         service: hitSvc,
         country: hitCountry,
@@ -1266,6 +1279,15 @@ export class PlanetMapCanvas {
         const rect = this.canvas.getBoundingClientRect();
         const mx = e.clientX - rect.left;
         const my = e.clientY - rect.top;
+        const hitSat = this.satelliteOverlay.hitTest(mx, my);
+        if (hitSat) {
+          this.satelliteOverlay.selectedNoradId = hitSat.noradId;
+          this.selectedNodeKey = null;
+          this.selectedServiceId = null;
+          this.selectedCountryName = null;
+          this.callbacks.onSelectSatellite?.(hitSat);
+          return;
+        }
         if (this.viewMode === 'global') {
           const hitSvc = this.hitTestService(mx, my);
           if (hitSvc) {
@@ -1293,6 +1315,7 @@ export class PlanetMapCanvas {
           return;
         }
         // Clicked ocean -> clear map selection
+        this.satelliteOverlay.selectedNoradId = null;
         this.selectedNodeKey = null;
         this.selectedCountryName = null;
         this.callbacks.onClearSelection?.();

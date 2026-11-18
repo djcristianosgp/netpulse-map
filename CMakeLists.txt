@@ -33,6 +33,11 @@ set(NETPULSE_CORE_SOURCES
   src/discovery/topology_builder.cpp
   src/intelligence/intelligence_engine.cpp
   src/notifications/notification_engine.cpp
+  src/satellite/orbital_propagator.cpp
+  src/satellite/satellite_catalog.cpp
+  src/satellite/satellite_configuration.cpp
+  src/satellite/satellite_manager.cpp
+  src/satellite/satellite_position_service.cpp
   src/actions.cpp
   src/tray_host.cpp
 )

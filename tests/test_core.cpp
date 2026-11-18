@@ -32,6 +32,11 @@ inline int closesocket(int s) { return ::close(s); }
 #include "../src/network/interface_monitor.hpp"
 #include "../src/notifications/notification_engine.hpp"
 #include "../src/quality/network_quality_engine.hpp"
+#include "../src/satellite/orbital_propagator.hpp"
+#include "../src/satellite/satellite_catalog.hpp"
+#include "../src/satellite/satellite_configuration.hpp"
+#include "../src/satellite/satellite_manager.hpp"
+#include "../src/satellite/satellite_position_service.hpp"
 #include "../src/security/audit_log.hpp"
 #include "../src/security/auth_manager.hpp"
 #include "../src/security/rate_limiter.hpp"
@@ -2217,6 +2222,272 @@ int testPlatformBenchmarksAndStabilization() {
   return 0;
 }
 
+int testSatelliteTrackingV1() {
+  using namespace netpulse::satellite;
+
+  std::filesystem::path dir = std::filesystem::temp_directory_path() / "netpulse_satellite_v1_test";
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+  std::filesystem::create_directories(dir, ec);
+
+  // 1. OMM JSON parsing (ISS 25544 & Tiangong 48274)
+  const std::string ommSample = R"JSON([
+    {
+      "OBJECT_NAME": "ISS (ZARYA)",
+      "OBJECT_ID": "1998-067A",
+      "EPOCH": "2026-11-18T12:00:00.000000",
+      "MEAN_MOTION": 15.49501234,
+      "ECCENTRICITY": 0.0006234,
+      "INCLINATION": 51.6416,
+      "RA_OF_ASC_NODE": 120.4567,
+      "ARG_OF_PERICENTER": 45.1234,
+      "MEAN_ANOMALY": 314.8765,
+      "EPHEMERIS_TYPE": 0,
+      "CLASSIFICATION_TYPE": "U",
+      "NORAD_CAT_ID": 25544,
+      "ELEMENT_SET_NO": 999,
+      "REV_AT_EPOCH": 48123,
+      "BSTAR": 0.00012345,
+      "MEAN_MOTION_DOT": 0.00015000,
+      "MEAN_MOTION_DDOT": 0
+    },
+    {
+      "OBJECT_NAME": "CSS (TIANHE)",
+      "OBJECT_ID": "2021-035A",
+      "EPOCH": "2026-11-18T12:00:00.000000",
+      "MEAN_MOTION": "15.61204567",
+      "ECCENTRICITY": "0.0005120",
+      "INCLINATION": "41.4742",
+      "RA_OF_ASC_NODE": "210.1234",
+      "ARG_OF_PERICENTER": "92.3456",
+      "MEAN_ANOMALY": "267.6543",
+      "EPHEMERIS_TYPE": 0,
+      "CLASSIFICATION_TYPE": "U",
+      "NORAD_CAT_ID": 48274,
+      "ELEMENT_SET_NO": 512,
+      "REV_AT_EPOCH": 21500,
+      "BSTAR": "0.00011000"
+    }
+  ])JSON";
+
+  std::vector<OrbitalElements> ommEls;
+  std::string err;
+  CHECK(SatelliteCatalog::parseOmmJson(ommSample, ommEls, err));
+  CHECK(ommEls.size() == 2);
+  CHECK(ommEls[0].noradId == kNoradIss);
+  CHECK(ommEls[0].intlDesignator == "1998-067A");
+  CHECK(std::abs(ommEls[0].inclinationDeg - 51.6416) < 1e-4);
+  CHECK(ommEls[1].noradId == kNoradTiangong);
+  CHECK(ommEls[1].intlDesignator == "2021-035A");
+  CHECK(std::abs(ommEls[1].inclinationDeg - 41.4742) < 1e-4);
+
+  // 2. TLE parsing & Vallado AIAA 2006-6753 SGP4 Reference Vector (Sat #00005)
+  const std::string valladoTle =
+      "VANGUARD 1\n"
+      "1 00005U 58002B   00179.78495062  .00000023  00000-0  28098-4 0  4753\n"
+      "2 00005  34.2682 348.7242 1859667 331.7664  19.3264 10.82419157413667\n";
+  std::vector<OrbitalElements> tleEls;
+  CHECK(SatelliteCatalog::parseTleText(valladoTle, tleEls, err));
+  CHECK(tleEls.size() == 1);
+  CHECK(tleEls[0].noradId == 5);
+  CHECK(std::abs(tleEls[0].eccentricity - 0.1859667) < 1e-7);
+  CHECK(std::abs(tleEls[0].bstar - 0.28098e-4) < 1e-9);
+
+  Vec3 r0{}, v0{};
+  CHECK(OrbitalPropagator::propagateTemeAtTsince(tleEls[0], 0.0, r0, v0, err));
+  // Vallado AIAA-2006-6753 Sat #00005 at t=0: r=[7022.46529266, -1400.08296755, 0.03995155] km
+  CHECK(std::abs(r0.x - 7022.46529) < 0.01);
+  CHECK(std::abs(r0.y - (-1400.08297)) < 0.01);
+  CHECK(std::abs(r0.z - 0.03995) < 0.01);
+  CHECK(std::abs(v0.x - 1.89384) < 0.001);
+  CHECK(std::abs(v0.y - 6.40589) < 0.001);
+  CHECK(std::abs(v0.z - 4.53481) < 0.001);
+
+  Vec3 r360{}, v360{};
+  CHECK(OrbitalPropagator::propagateTemeAtTsince(tleEls[0], 360.0, r360, v360, err));
+  // Vallado AIAA-2006-6753 Sat #00005 at t=360: r=[-7154.03120202, -3783.17682504, -3536.19412294] km
+  CHECK(std::abs(r360.x - (-7154.03120)) < 0.05);
+  CHECK(std::abs(r360.y - (-3783.17683)) < 0.05);
+  CHECK(std::abs(r360.z - (-3536.19412)) < 0.05);
+
+  // 3. Geodetic conversion, GMST, ISS/Tiangong lat/lon/alt/vel & antimeridian track split
+  const double gmstJ2000 = OrbitalPropagator::computeGmstRadians(2451545.0, 0.0);
+  // At J2000.0, GMST = 280.46061837 deg = 4.89496121 rad
+  CHECK(std::abs(gmstJ2000 - 4.89496121) < 1e-4);
+
+  // Test equatorial TEME point rotated by GMST -> lon ~ 0, lat ~ 0, alt ~ 420 km
+  const Vec3 eqTeme{6798.137 * std::cos(gmstJ2000), 6798.137 * std::sin(gmstJ2000), 0.0};
+  const GeodeticState eqGeo = OrbitalPropagator::temeToGeodetic(eqTeme, 2451545.0, 0.0);
+  CHECK(std::abs(eqGeo.latitudeDeg) < 1e-4);
+  CHECK(std::abs(eqGeo.longitudeDeg) < 1e-4);
+  CHECK(std::abs(eqGeo.altitudeKm - 420.0) < 0.1);
+
+  SatellitePosition issPos;
+  CHECK(OrbitalPropagator::propagate(ommEls[0], ommEls[0].epochMs + 15ULL * 60000ULL, issPos, err));
+  CHECK(issPos.valid);
+  CHECK(issPos.latitudeDeg >= -52.5 && issPos.latitudeDeg <= 52.5);
+  CHECK(issPos.longitudeDeg >= -180.0 && issPos.longitudeDeg <= 180.0);
+  CHECK(issPos.altitudeKm > 350.0 && issPos.altitudeKm < 480.0);
+  CHECK(issPos.velocityKmS > 7.4 && issPos.velocityKmS < 7.9);
+
+  SatelliteTrack issTrack;
+  CHECK(OrbitalPropagator::propagateTrack(ommEls[0], ommEls[0].epochMs, 45, 90, 60, issTrack, err));
+  CHECK(!issTrack.pastSegments.empty());
+  CHECK(!issTrack.futureSegments.empty());
+  for (const auto& seg : issTrack.futureSegments) {
+    for (size_t i = 1; i < seg.size(); ++i) {
+      CHECK(std::abs(seg[i].lon - seg[i - 1].lon) <= 180.001);
+    }
+  }
+
+  // Explicit antimeridian split test (+179 -> -179)
+  std::vector<TrackPoint> crossPts{
+      {178.0, 10.0, 420.0, 0},
+      {179.5, 11.0, 420.0, 60},
+      {-179.0, 12.0, 420.0, 120},
+      {-177.0, 13.0, 420.0, 180},
+  };
+  auto splitCross = OrbitalPropagator::splitAntimeridianSegments(crossPts);
+  CHECK(splitCross.size() == 2);
+  CHECK(std::abs(splitCross[0].back().lon - 180.0) < 1e-6);
+  CHECK(std::abs(splitCross[1].front().lon - (-180.0)) < 1e-6);
+  CHECK(std::abs(splitCross[0].back().lat - splitCross[1].front().lat) < 1e-6);
+
+  // 4. Invalid data handling (bad TLE checksum, mismatched NORAD, out-of-range OMM)
+  std::vector<OrbitalElements> badOut;
+  const std::string badChecksumTle =
+      "1 25544U 98067A   26322.50000000  .00015000  00000-0  12345-3 0  9990\n"
+      "2 25544  51.6416 120.4567 0006234  45.1234 314.8765 15.49501234481239\n";
+  CHECK(!SatelliteCatalog::parseTleText(badChecksumTle, badOut, err));
+
+  const std::string badOmmEcc = R"([{"NORAD_CAT_ID":25544,"EPOCH":"2026-11-18T12:00:00Z","MEAN_MOTION":15.5,"ECCENTRICITY":1.2,"INCLINATION":51.6,"RA_OF_ASC_NODE":0,"ARG_OF_PERICENTER":0,"MEAN_ANOMALY":0}])";
+  CHECK(!SatelliteCatalog::parseOmmJson(badOmmEcc, badOut, err));
+
+  // 5. Catalog cache + connection failure resilience (must NOT discard valid cache)
+  const auto cachePath = dir / "satellite_catalog_cache.json";
+  int fetchCalls = 0;
+  {
+    SatelliteCatalog cat(cachePath);
+    cat.setHttpFetcher([&](const std::string& url) -> HttpFetchResult {
+      ++fetchCalls;
+      if (url.find("GROUP=stations") != std::string::npos) {
+        return HttpFetchResult{true, 200, ommSample, ""};
+      }
+      return HttpFetchResult{false, 404, "", "not_found"};
+    });
+    const uint64_t t0 = ommEls[0].epochMs;
+    CHECK(cat.refreshFromSource(t0, true, err));
+    CHECK(fetchCalls == 1);
+    CHECK(!cat.shouldAutoRefresh(t0 + 60000ULL, 21600)); // Avoid repeated downloads within TTL
+  }
+
+  {
+    // New catalog instance loads cache from disk offline, then survives connection failure
+    SatelliteCatalog cat2(cachePath);
+    CHECK(cat2.loadCache());
+    auto issEntry = cat2.getEntry(kNoradIss);
+    auto tgEntry = cat2.getEntry(kNoradTiangong);
+    CHECK(issEntry.has_value() && issEntry->elements.valid && issEntry->dataState == CatalogDataState::Cached);
+    CHECK(tgEntry.has_value() && tgEntry->elements.valid && tgEntry->dataState == CatalogDataState::Cached);
+
+    cat2.setHttpFetcher([](const std::string&) -> HttpFetchResult {
+      return HttpFetchResult{false, 0, "", "simulated_network_down"};
+    });
+    CHECK(!cat2.refreshFromSource(ommEls[0].epochMs + 100000ULL, true, err));
+    auto issAfterFail = cat2.getEntry(kNoradIss);
+    CHECK(issAfterFail.has_value());
+    CHECK(issAfterFail->elements.valid); // Never discarded!
+    CHECK(issAfterFail->dataState == CatalogDataState::CachedFallback);
+    CHECK(!issAfterFail->lastError.empty());
+  }
+
+  // 6. Configuration persistence, activation/deactivation, suspension & live HTTP API integration
+  const auto cfgPath = dir / "satellite_settings.tsv";
+  SatelliteConfiguration satCfg(cfgPath);
+  SatelliteCatalog cat3(cachePath);
+  CHECK(cat3.loadCache());
+  SatelliteManager satMgr(cat3, satCfg);
+  SatellitePositionService satSvc(satMgr);
+
+  // Both active initially
+  CHECK(satMgr.hasActiveTargets());
+  CHECK(!satSvc.isSuspended());
+  const std::string snapAll = satSvc.getSnapshotJson();
+  CHECK(snapAll.find("\"noradId\":25544") != std::string::npos);
+  CHECK(snapAll.find("\"noradId\":48274") != std::string::npos);
+  CHECK(snapAll.find("\"active\":true") != std::string::npos);
+
+  // Wire ApiRouter and verify HTTP GET/POST endpoints
+  AuthManager auth(dir, "np_adm_sat_test_token_123456");
+  AuditLog audit(dir / "audit.tsv");
+  RateLimiter authLim(10, 60000, 60000);
+  ServiceMonitor svcMon(dir / "svc.tsv");
+  GeoDnsService geoDns(dir / "geo.tsv");
+  HistoryStore history(dir);
+  TracerouteService tracer(geoDns, &history);
+  SettingsStore settings(dir / "settings.tsv");
+  UpdateManager updater("2.0.0", nullptr);
+  ApiRouter router(ApiDependencies{
+      auth, audit, authLim, svcMon, tracer, settings, history, updater, dir, false, false,
+      []() { return "{}"; }, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+      &satMgr, &satSvc});
+
+  HttpRequest getSatReq;
+  getSatReq.method = "GET";
+  getSatReq.path = "/api/v1/satellites";
+  getSatReq.remoteIp = "127.0.0.1";
+  getSatReq.headers["authorization"] = "Bearer np_adm_sat_test_token_123456";
+  HttpResponse rGet = router.handleHttp(getSatReq);
+  CHECK(rGet.statusCode == 200);
+  CHECK(rGet.body.find("\"ISS") != std::string::npos);
+  CHECK(rGet.body.find("\"Tiangong") != std::string::npos);
+
+  // Disable Tiangong individually via API
+  HttpRequest postCfgReq;
+  postCfgReq.method = "POST";
+  postCfgReq.path = "/api/v1/satellites/config";
+  postCfgReq.remoteIp = "127.0.0.1";
+  postCfgReq.headers["authorization"] = "Bearer np_adm_sat_test_token_123456";
+  postCfgReq.body = "{\"toggleNoradId\":48274,\"visible\":false,\"futureTrackMinutes\":120}";
+  HttpResponse rPost = router.handleHttp(postCfgReq);
+  CHECK(rPost.statusCode == 200);
+  CHECK(!satCfg.isObjectVisible(kNoradTiangong));
+  CHECK(satCfg.isObjectVisible(kNoradIss));
+  CHECK(satCfg.get().futureTrackMinutes == 120);
+
+  // Disable module layer -> suspends propagation calculations
+  postCfgReq.body = "{\"enabled\":false}";
+  HttpResponse rOff = router.handleHttp(postCfgReq);
+  CHECK(rOff.statusCode == 200);
+  CHECK(satSvc.isSuspended());
+
+  // Re-enable module & verify persistence in new SatelliteConfiguration instance
+  postCfgReq.body = "{\"enabled\":true,\"selectAll\":true}";
+  HttpResponse rOn = router.handleHttp(postCfgReq);
+  CHECK(rOn.statusCode == 200);
+  CHECK(!satSvc.isSuspended());
+
+  SatelliteConfiguration reloadedCfg(cfgPath);
+  CHECK(reloadedCfg.get().enabled);
+  CHECK(reloadedCfg.get().futureTrackMinutes == 120);
+  CHECK(reloadedCfg.isObjectVisible(kNoradIss));
+  CHECK(reloadedCfg.isObjectVisible(kNoradTiangong));
+
+  // Verify Prometheus & OpenAPI include Satellite Tracking
+  const std::string openApi = buildOpenApiV1SpecJson("2.0.0");
+  CHECK(openApi.find("/api/v1/satellites") != std::string::npos);
+  const std::string prom = formatPrometheusMetrics(ApiDependencies{
+      auth, audit, authLim, svcMon, tracer, settings, history, updater, dir, false, false,
+      []() { return "{}"; }, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+      &satMgr, &satSvc});
+  CHECK(prom.find("netpulse_satellite_module_enabled 1") != std::string::npos);
+
+  history.stop();
+  std::filesystem::remove_all(dir, ec);
+  std::cout << "[PASS] testSatelliteTrackingV1\n";
+  return 0;
+}
+
 int main() {
 #ifdef _WIN32
   WSADATA wsa{};
@@ -2246,6 +2517,7 @@ int main() {
   rc |= testIntelligenceAndSecurityEngine();
   rc |= testNotificationsPrometheusAndOpenApi();
   rc |= testPlatformBenchmarksAndStabilization();
+  rc |= testSatelliteTrackingV1();
 
 #ifdef _WIN32
   WSACleanup();

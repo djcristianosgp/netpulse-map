@@ -825,6 +825,83 @@ body:not(.left-open) .panel-left {
 .dot.syn { background: #fbbf24; }
 .dot.closed { background: #f43f5e; }
 .dot.lan { background: #a78bfa; }
+.dot.sat { background: #22d3ee; box-shadow: 0 0 6px #22d3ee; border: 1px solid #fbbf24; }
+
+/* Satellite Tracking Side Panel */
+.panel-sat {
+  z-index: 26;
+}
+body:not(.sat-open) .panel-sat {
+  transform: translateX(calc(-100% - 14px));
+}
+.sat-cfg-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px;
+}
+.sat-cfg-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+.sat-panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sat-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.sat-item {
+  padding: 8px 9px;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(15, 23, 42, 0.55);
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: background 0.12s, border-color 0.12s;
+}
+.sat-item:hover {
+  background: rgba(30, 41, 59, 0.72);
+  border-color: rgba(56, 189, 248, 0.35);
+}
+.sat-item.selected {
+  background: rgba(34, 211, 238, 0.14);
+  border-color: rgba(34, 211, 238, 0.6);
+}
+.sat-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.sat-item-left {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.sat-color-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.sat-detail-card {
+  padding: 8px;
+  border-radius: 9px;
+  background: rgba(2, 6, 23, 0.52);
+  border: 1px solid rgba(56, 189, 248, 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
 
 /* Tooltip */
 .map-tooltip {

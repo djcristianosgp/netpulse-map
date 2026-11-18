@@ -8,6 +8,8 @@
 #include "../network/interface_monitor.hpp"
 #include "../notifications/notification_engine.hpp"
 #include "../quality/network_quality_engine.hpp"
+#include "../satellite/satellite_manager.hpp"
+#include "../satellite/satellite_position_service.hpp"
 #include "../security/audit_log.hpp"
 #include "../security/auth_manager.hpp"
 #include "../security/rate_limiter.hpp"
@@ -53,6 +55,8 @@ struct ApiDependencies {
   std::function<std::string()> getLanTopologyJson = nullptr;
   IntelligenceEngine* intelligence = nullptr;
   NotificationEngine* notifications = nullptr;
+  satellite::SatelliteManager* satelliteManager = nullptr;
+  satellite::SatellitePositionService* satellitePositions = nullptr;
 };
 
 class ApiRouter {

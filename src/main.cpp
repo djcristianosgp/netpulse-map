@@ -20,6 +20,11 @@
 #include "geo_dns.hpp"
 #include "history_store.hpp"
 #include "net_monitor.hpp"
+#include "quality/network_quality_engine.hpp"
+#include "satellite/satellite_catalog.hpp"
+#include "satellite/satellite_configuration.hpp"
+#include "satellite/satellite_manager.hpp"
+#include "satellite/satellite_position_service.hpp"
 #include "security/audit_log.hpp"
 #include "security/auth_manager.hpp"
 #include "security/rate_limiter.hpp"
@@ -349,6 +354,11 @@ int main(int argc, char** argv) {
   netpulse::IntelligenceEngine intelligenceEngine(history);
   netpulse::NotificationEngine notificationEngine(history);
   notificationEngine.start();
+
+  netpulse::satellite::SatelliteConfiguration satelliteConfig(dataDir / "satellite_settings.tsv");
+  netpulse::satellite::SatelliteCatalog satelliteCatalog(dataDir / "satellite_catalog_cache.json");
+  netpulse::satellite::SatelliteManager satelliteManager(satelliteCatalog, satelliteConfig);
+  netpulse::satellite::SatellitePositionService satellitePositions(satelliteManager);
   history.setExternalEventHook([&notificationEngine](const netpulse::HistoryEvent& ev) {
     notificationEngine.notify(netpulse::NotificationEvent{
         ev.tsMs, ev.kind, ev.severity, ev.title, ev.detail, "history_store"});
@@ -441,6 +451,8 @@ int main(int argc, char** argv) {
       },
       &intelligenceEngine,
       &notificationEngine,
+      &satelliteManager,
+      &satellitePositions,
   });
 
   const uint64_t startMs = nowMs();
@@ -512,6 +524,7 @@ int main(int argc, char** argv) {
 
   if (!server.start()) {
     std::cerr << "[ERROR] Falha ao iniciar servidor em " << bindHost << ":" << port << "\n";
+    satellitePositions.stop();
     tracer.stop();
     serviceMon.stop();
     updater.stop();
@@ -522,6 +535,13 @@ int main(int argc, char** argv) {
 #endif
     return 1;
   }
+
+  satellitePositions.setBroadcastCallback([&server](const std::string& json) {
+    if (server.clientCount() > 0) {
+      server.broadcastText(json);
+    }
+  });
+  satellitePositions.start();
 
   const std::string scheme = tlsCtx.isReady() ? "https" : "http";
   const std::string baseUrl = scheme + "://127.0.0.1:" + std::to_string(server.port());
@@ -609,6 +629,8 @@ int main(int argc, char** argv) {
   gRunning.store(false);
   pollThread.request_stop();
   pollThread.join();
+  satellitePositions.setBroadcastCallback(nullptr);
+  satellitePositions.stop();
   discoveryEngine.stop();
   tracer.stop();
   qualityEngine.stop();

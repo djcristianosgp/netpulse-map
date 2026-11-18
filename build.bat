@@ -84,6 +84,11 @@ cl /nologo /MP /std:c++20 /O2 /EHsc /W4 /utf-8 ^
   "%ROOT%src\discovery\topology_builder.cpp" ^
   "%ROOT%src\intelligence\intelligence_engine.cpp" ^
   "%ROOT%src\notifications\notification_engine.cpp" ^
+  "%ROOT%src\satellite\orbital_propagator.cpp" ^
+  "%ROOT%src\satellite\satellite_catalog.cpp" ^
+  "%ROOT%src\satellite\satellite_configuration.cpp" ^
+  "%ROOT%src\satellite\satellite_manager.cpp" ^
+  "%ROOT%src\satellite\satellite_position_service.cpp" ^
   "%ROOT%src\actions.cpp" ^
   "%ROOT%src\tray_host.cpp" ^
   "%ROOT%build\sqlite3.obj" ^
@@ -121,6 +126,11 @@ cl /nologo /MP /std:c++20 /O2 /EHsc /W4 /utf-8 ^
   "%ROOT%build\obj_app\topology_builder.obj" ^
   "%ROOT%build\obj_app\intelligence_engine.obj" ^
   "%ROOT%build\obj_app\notification_engine.obj" ^
+  "%ROOT%build\obj_app\orbital_propagator.obj" ^
+  "%ROOT%build\obj_app\satellite_catalog.obj" ^
+  "%ROOT%build\obj_app\satellite_configuration.obj" ^
+  "%ROOT%build\obj_app\satellite_manager.obj" ^
+  "%ROOT%build\obj_app\satellite_position_service.obj" ^
   "%ROOT%build\obj_app\actions.obj" ^
   "%ROOT%build\obj_app\tray_host.obj" ^
   "%ROOT%build\sqlite3.obj" ^

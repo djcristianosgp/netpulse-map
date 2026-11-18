@@ -97,6 +97,11 @@ const state = {
     unackOnly: false,
     timer: null,
   },
+  satellites: {
+    panelOpen: false,
+    selectedNoradId: 25544,
+    data: null,
+  },
   auth: {
     authenticated: false,
     role: 'none',
@@ -219,8 +224,24 @@ const mapCanvas = new PlanetMapCanvas($('planetCanvas'), {
   onZoomChange(zoom) {
     $('zoomLevel').textContent = `${Math.round(zoom * 100)}%`;
   },
-  onHover({ x, y, node, service, country, countryCount }) {
+  onHover({ x, y, satellite, node, service, country, countryCount }) {
     const tt = $('mapTooltip');
+    if (satellite) {
+      const p = satellite.position;
+      const posTxt = p && p.valid
+        ? `Lat ${p.lat.toFixed(2)}° · Lon ${p.lon.toFixed(2)}° · Alt ${p.altitudeKm.toFixed(1)} km`
+        : 'Posição indisponível';
+      const velTxt = p && p.valid ? `Vel ${p.velocityKmS.toFixed(2)} km/s · Inc ${satellite.inclinationDeg.toFixed(2)}°` : '';
+      tt.innerHTML = `
+        <div class="tt-title">🛰 ${escHtml(satellite.name)}</div>
+        <div class="tt-sub">NORAD ${satellite.noradId} · ${escHtml(satellite.category)}</div>
+        <div class="tt-sub">${escHtml(posTxt)}</div>
+        ${velTxt ? `<div class="tt-sub">${escHtml(velTxt)}</div>` : ''}
+      `;
+      positionTooltip(tt, x, y);
+      tt.classList.remove('hidden');
+      return;
+    }
     if (service) {
       const rtt =
         service.status === 'down'
@@ -276,6 +297,14 @@ const mapCanvas = new PlanetMapCanvas($('planetCanvas'), {
     state.selectedCountry = null;
     openServiceInspector(svc);
     renderPanel();
+  },
+  onSelectSatellite(sat) {
+    state.satellites.selectedNoradId = sat.noradId;
+    state.selectedNodeKey = null;
+    state.selectedConnKey = null;
+    state.selectedCountry = null;
+    openSatelliteInspector(sat);
+    renderSatellitePanel();
   },
   onSelectCountry(countryName) {
     state.selectedCountry = countryName;
@@ -1158,7 +1187,258 @@ function openCountryInspector(countryName) {
     });
 }
 
+let inspectedSatelliteNoradId = null;
+
+function formatSatDataState(st) {
+  if (st === 'live') return { text: 'Ao vivo (CelesTrak)', cls: 'new' };
+  if (st === 'cached') return { text: 'Cache local', cls: '' };
+  if (st === 'cached_fallback') return { text: 'Cache (falha de rede)', cls: 'syn' };
+  return { text: 'Indisponível', cls: 'closed' };
+}
+
+function formatSatTimestamp(ms) {
+  if (!ms || ms <= 0) return '—';
+  try {
+    return new Date(ms).toLocaleString('pt-BR');
+  } catch {
+    return String(ms);
+  }
+}
+
+function buildSatelliteFichaHtml(sat) {
+  if (!sat) {
+    return '<div class="sec-row-meta">Selecione um satélite para visualizar a ficha técnica.</div>';
+  }
+  const stMeta = formatSatDataState(sat.dataState);
+  const p = sat.position;
+  const hasPos = !!(p && p.valid);
+  const velKmh = hasPos ? `${Math.round(p.velocityKmS * 3600).toLocaleString('pt-BR')} km/h` : '';
+  const epochTxt = sat.elementEpochIso || formatSatTimestamp(sat.elementEpochMs);
+  const fetchedTxt = formatSatTimestamp(sat.elementsFetchedAtMs || sat.lastSuccessMs);
+  const lastUpdateStr = sat.hasElements
+    ? `${epochTxt} (obtido: ${fetchedTxt})`
+    : 'Sem elementos em cache';
+
+  return `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:4px">
+      <div style="display:flex;align-items:center;gap:7px;min-width:0">
+        <span class="sat-color-dot" style="background:${escHtml(sat.color || '#22d3ee')}"></span>
+        <strong style="font-size:12.5px;color:#f8fafc">${escHtml(sat.name)}</strong>
+      </div>
+      <span class="state-pill ${sat.active ? 'new' : ''}">${sat.active ? 'ATIVO' : sat.enabled ? 'AGUARDANDO' : 'DESATIVADO'}</span>
+    </div>
+    <div class="kv-grid">
+      <div class="kv-k">Nome</div><div class="kv-v">${escHtml(sat.name)}</div>
+      <div class="kv-k">Identificador</div><div class="kv-v">NORAD ${sat.noradId} · ${escHtml(sat.intlId || '—')}</div>
+      <div class="kv-k">Categoria</div><div class="kv-v">${escHtml(sat.category)}</div>
+      <div class="kv-k">Altitude</div><div class="kv-v">${hasPos ? `${p.altitudeKm.toFixed(2)} km` : '—'}</div>
+      <div class="kv-k">Velocidade</div><div class="kv-v">${hasPos ? `${p.velocityKmS.toFixed(3)} km/s (${velKmh})` : '—'}</div>
+      <div class="kv-k">Inclinação</div><div class="kv-v">${sat.hasElements ? `${sat.inclinationDeg.toFixed(2)}°` : '—'}</div>
+      <div class="kv-k">Posição Atual</div><div class="kv-v">${hasPos ? `${p.lat.toFixed(3)}°, ${p.lon.toFixed(3)}°` : '—'}</div>
+      <div class="kv-k">Período</div><div class="kv-v">${hasPos ? `${p.orbitalPeriodMin.toFixed(1)} min` : '—'}</div>
+      <div class="kv-k">Últ. Atualização</div><div class="kv-v">${escHtml(lastUpdateStr)}</div>
+      <div class="kv-k">Estado Dados</div><div class="kv-v"><span class="state-pill ${stMeta.cls}">${escHtml(stMeta.text)}</span>${sat.lastError ? `<div class="sec-row-meta" style="margin-top:3px;color:#fda4af">${escHtml(sat.lastError)}</div>` : ''}</div>
+      <div class="kv-k">Fonte / Formato</div><div class="kv-v">${escHtml(sat.elementSource || 'CelesTrak')} · ${escHtml(sat.elementFormat || 'OMM_JSON')}</div>
+    </div>
+  `;
+}
+
+function openSatelliteInspector(sat) {
+  if (!sat) return;
+  inspectedSatelliteNoradId = sat.noradId;
+  document.body.classList.add('right-open');
+  $('inspectorPanel').classList.remove('hidden');
+  $('inspEyebrow').textContent = `OBJETO ORBITAL · NORAD ${sat.noradId}`;
+  $('inspTitle').textContent = sat.shortName || sat.name;
+  $('inspBody').innerHTML = `
+    ${buildSatelliteFichaHtml(sat)}
+    <div class="insp-actions">
+      <button type="button" class="action-btn" id="btnInspSatFly">⌖ Centralizar Órbita</button>
+      <button type="button" class="action-btn" id="btnInspSatPanel">🛰 Objetos Orbitais</button>
+    </div>
+  `;
+  const flyBtn = $('btnInspSatFly');
+  if (flyBtn && sat.position && sat.position.valid) {
+    flyBtn.onclick = () => mapCanvas.flyTo(sat.position.lon, sat.position.lat, 2.4);
+  }
+  const panBtn = $('btnInspSatPanel');
+  if (panBtn) {
+    panBtn.onclick = () => toggleSatellitePanel(true);
+  }
+}
+
+function renderSatellitePanel() {
+  const payload = state.satellites.data;
+  const listEl = $('satObjectList');
+  const detailEl = $('satDetailCard');
+  if (!listEl || !detailEl) return;
+
+  const cfg = payload?.config || {
+    enabled: true,
+    showTrajectory: true,
+    futureTrackMinutes: 90,
+    positionIntervalMs: 2000,
+  };
+  const sats = payload?.satellites || [];
+
+  if ($('satLayerEnabledChk')) $('satLayerEnabledChk').checked = cfg.enabled !== false;
+  if ($('satShowTrajectoryChk')) $('satShowTrajectoryChk').checked = cfg.showTrajectory !== false;
+  if ($('satFutureMinutesSelect')) $('satFutureMinutesSelect').value = String(cfg.futureTrackMinutes || 90);
+  if ($('satIntervalSelect')) $('satIntervalSelect').value = String(cfg.positionIntervalMs || 2000);
+
+  const activeCount = sats.filter((s) => cfg.enabled && s.enabled).length;
+  if ($('satActiveCountPill')) {
+    $('satActiveCountPill').textContent = `${activeCount}/${sats.length} ativos`;
+    $('satActiveCountPill').className = `state-pill ${activeCount > 0 ? 'new' : ''}`;
+  }
+
+  if (sats.length === 0) {
+    listEl.innerHTML = '<div class="list-item"><div class="item-sub">Carregando objetos orbitais...</div></div>';
+    detailEl.innerHTML = buildSatelliteFichaHtml(null);
+    return;
+  }
+
+  listEl.innerHTML = sats
+    .map((s) => {
+      const sel = state.satellites.selectedNoradId === s.noradId ? 'selected' : '';
+      const isActive = cfg.enabled && s.enabled;
+      const stMeta = formatSatDataState(s.dataState);
+      const posTxt =
+        isActive && s.position && s.position.valid
+          ? `${s.position.lat.toFixed(2)}°, ${s.position.lon.toFixed(2)}° · ${s.position.altitudeKm.toFixed(0)} km`
+          : !cfg.enabled
+          ? 'Camada desativada'
+          : !s.enabled
+          ? 'Objeto desmarcado'
+          : 'Aguardando elementos orbitais';
+      return `
+        <div class="sat-item ${sel}" data-sat-row="${s.noradId}">
+          <div class="sat-item-head">
+            <label class="sat-item-left" style="cursor:pointer" data-sat-label="${s.noradId}">
+              <input type="checkbox" class="switch-chk" data-sat-chk="${s.noradId}" ${s.enabled ? 'checked' : ''} />
+              <span class="sat-color-dot" style="background:${escHtml(s.color || '#22d3ee')};opacity:${isActive ? '1' : '0.35'}"></span>
+              <span class="item-proc">${escHtml(s.shortName || s.code)}</span>
+            </label>
+            <span class="state-pill ${isActive ? 'new' : stMeta.cls}">${isActive ? 'ATIVO' : 'INATIVO'}</span>
+          </div>
+          <div class="item-sub">
+            <span>NORAD ${s.noradId} · ${escHtml(s.intlId || '')}</span>
+            <span>${escHtml(stMeta.text)}</span>
+          </div>
+          <div class="item-geo">${escHtml(posTxt)}</div>
+        </div>
+      `;
+    })
+    .join('');
+
+  listEl.querySelectorAll('[data-sat-chk]').forEach((chk) => {
+    chk.addEventListener('click', (e) => e.stopPropagation());
+    chk.addEventListener('change', (e) => {
+      const noradId = parseInt(chk.getAttribute('data-sat-chk'), 10);
+      saveSatelliteConfig({ toggleNoradId: noradId, visible: e.target.checked });
+    });
+  });
+
+  listEl.querySelectorAll('[data-sat-row]').forEach((row) => {
+    row.addEventListener('click', () => {
+      const noradId = parseInt(row.getAttribute('data-sat-row'), 10);
+      state.satellites.selectedNoradId = noradId;
+      mapCanvas.satelliteOverlay.selectedNoradId = noradId;
+      const sat = sats.find((x) => x.noradId === noradId);
+      if (sat && sat.enabled && cfg.enabled && sat.position && sat.position.valid) {
+        mapCanvas.flyTo(sat.position.lon, sat.position.lat, 2.2);
+      }
+      renderSatellitePanel();
+    });
+  });
+
+  const selectedSat =
+    sats.find((x) => x.noradId === state.satellites.selectedNoradId) || sats[0];
+  detailEl.innerHTML = buildSatelliteFichaHtml(selectedSat);
+}
+
+function applySatellitePayload(payload) {
+  if (!payload || !Array.isArray(payload.satellites)) return;
+  state.satellites.data = payload;
+  mapCanvas.updateSatellites(payload);
+
+  const layerOn = payload.config?.enabled !== false;
+  if ($('btnSatellites')) {
+    $('btnSatellites').classList.toggle('active', layerOn);
+  }
+  if ($('satLegendItem')) {
+    $('satLegendItem').classList.toggle('hidden', !layerOn);
+  }
+
+  if (state.satellites.panelOpen) {
+    renderSatellitePanel();
+  }
+  if (inspectedSatelliteNoradId !== null && !$('inspectorPanel').classList.contains('hidden')) {
+    const sat = payload.satellites.find((s) => s.noradId === inspectedSatelliteNoradId);
+    if (sat) openSatelliteInspector(sat);
+  }
+}
+
+async function loadSatellitesState() {
+  if (!state.auth.authenticated) return;
+  try {
+    const resp = await apiFetch('/api/satellites');
+    if (!resp.ok) return;
+    const payload = await resp.json();
+    applySatellitePayload(payload);
+  } catch {}
+}
+
+async function saveSatelliteConfig(patch) {
+  if (!hasRole('operator')) {
+    // Allow local visual toggle for read-only Viewer sessions without failing
+    const cur = state.satellites.data;
+    if (cur) {
+      const copy = JSON.parse(JSON.stringify(cur));
+      if (typeof patch.enabled === 'boolean') copy.config.enabled = patch.enabled;
+      if (typeof patch.showTrajectory === 'boolean') copy.config.showTrajectory = patch.showTrajectory;
+      if (patch.futureTrackMinutes) copy.config.futureTrackMinutes = patch.futureTrackMinutes;
+      if (patch.positionIntervalMs) copy.config.positionIntervalMs = patch.positionIntervalMs;
+      if (patch.selectAll) copy.satellites.forEach((s) => { s.enabled = true; });
+      if (patch.deselectAll) copy.satellites.forEach((s) => { s.enabled = false; });
+      if (patch.toggleNoradId) {
+        const t = copy.satellites.find((s) => s.noradId === patch.toggleNoradId);
+        if (t) t.enabled = !!patch.visible;
+      }
+      applySatellitePayload(copy);
+    }
+    return;
+  }
+  try {
+    const resp = await apiFetch('/api/satellites/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    if (resp.ok) {
+      const payload = await resp.json();
+      applySatellitePayload(payload);
+    }
+  } catch {}
+}
+
+function toggleSatellitePanel(forceState = null) {
+  const panel = $('satellitePanel');
+  if (!panel) return;
+  const next = forceState !== null ? !!forceState : !state.satellites.panelOpen;
+  state.satellites.panelOpen = next;
+  panel.classList.toggle('hidden', !next);
+  document.body.classList.toggle('sat-open', next);
+  if (next) {
+    document.body.classList.add('left-open');
+    loadSatellitesState();
+    renderSatellitePanel();
+  }
+  mapCanvas.fitPlanet();
+}
+
 function closeInspector() {
+  inspectedSatelliteNoradId = null;
   document.body.classList.remove('right-open');
   $('inspectorPanel').classList.add('hidden');
 }
@@ -1215,6 +1495,10 @@ async function connectWebSocket() {
     if (state.paused) return;
     try {
       const data = JSON.parse(ev.data);
+      if (data && data.type === 'satellites') {
+        applySatellitePayload(data);
+        return;
+      }
       if (!state.initialVersion && data.version) {
         state.initialVersion = data.version;
       } else if (state.initialVersion && data.version && data.version !== state.initialVersion) {
@@ -1285,6 +1569,41 @@ async function init() {
   $('btnAnimations').addEventListener('click', (e) => {
     mapCanvas.showAnimations = !mapCanvas.showAnimations;
     e.currentTarget.classList.toggle('active', mapCanvas.showAnimations);
+  });
+
+  $('btnSatellites')?.addEventListener('click', () => toggleSatellitePanel());
+  $('btnCloseSatPanel')?.addEventListener('click', () => toggleSatellitePanel(false));
+  $('satLayerEnabledChk')?.addEventListener('change', (e) => {
+    saveSatelliteConfig({ enabled: e.target.checked });
+  });
+  $('btnSatSelectAll')?.addEventListener('click', () => {
+    saveSatelliteConfig({ selectAll: true });
+  });
+  $('btnSatDeselectAll')?.addEventListener('click', () => {
+    saveSatelliteConfig({ deselectAll: true });
+  });
+  $('satShowTrajectoryChk')?.addEventListener('change', (e) => {
+    saveSatelliteConfig({ showTrajectory: e.target.checked });
+  });
+  $('satFutureMinutesSelect')?.addEventListener('change', (e) => {
+    saveSatelliteConfig({ futureTrackMinutes: parseInt(e.target.value, 10) || 90 });
+  });
+  $('satIntervalSelect')?.addEventListener('change', (e) => {
+    saveSatelliteConfig({ positionIntervalMs: parseInt(e.target.value, 10) || 2000 });
+  });
+  $('btnSatRefreshCatalog')?.addEventListener('click', async () => {
+    if (!hasRole('operator')) return;
+    const btn = $('btnSatRefreshCatalog');
+    btn.disabled = true;
+    try {
+      await apiFetch('/api/satellites/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force: true }),
+      });
+      setTimeout(loadSatellitesState, 900);
+    } catch {}
+    setTimeout(() => { btn.disabled = false; }, 1200);
   });
 
   $('intervalSelect').addEventListener('change', (e) => {
@@ -1517,6 +1836,8 @@ async function init() {
         closeSecurityModal();
       } else if (!$('settingsModal').classList.contains('hidden')) {
         closeSettingsModal();
+      } else if (state.satellites.panelOpen) {
+        toggleSatellitePanel(false);
       } else if (inInput) {
         $('searchInput').blur();
       } else {
@@ -1544,6 +1865,9 @@ async function init() {
       e.preventDefault();
       if ($('nocOverlay')?.classList.contains('hidden')) nocController?.open(false);
       else nocController?.close();
+    } else if (e.key === 's' || e.key === 'S') {
+      e.preventDefault();
+      toggleSatellitePanel();
     } else if (e.key === 'r' || e.key === 'R') {
       mapCanvas.fitPlanet();
     } else if (e.key === 'f' || e.key === 'F') {
@@ -2184,6 +2508,14 @@ function renderModuleDock() {
       desc: 'Canais Webhook HMAC/Discord/Telegram, /metrics e especificação API v1.',
       action: () => { closeModuleDock(); openNotificationsModal(); },
     },
+    {
+      id: 'satellites',
+      icon: '🛰',
+      title: 'Satellite Tracking (Objetos Orbitais)',
+      badge: 'SGP4 · ISS / Tiangong',
+      desc: 'Rastreamento orbital em tempo real, trajetórias SGP4, OMM/TLE CelesTrak e ficha técnica.',
+      action: () => { closeModuleDock(); toggleSatellitePanel(true); },
+    },
   ];
 
   const grid = $('moduleDockGrid');
@@ -2230,6 +2562,7 @@ async function loadInitialSettings() {
       switchViewMode(cfg.defaultView);
     }
   } catch {}
+  loadSatellitesState();
 }
 
 function syncNotifyCategoryDisabledState() {

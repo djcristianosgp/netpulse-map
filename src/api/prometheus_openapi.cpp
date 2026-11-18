@@ -161,6 +161,17 @@ std::string formatPrometheusMetrics(const ApiDependencies& deps) {
     ss << "netpulse_notifications_sent_total{status=\"error\"} " << deps.notifications->sentErrorCount() << "\n";
   }
 
+  // Satellite Tracking V1
+  if (deps.satellitePositions && deps.satelliteManager) {
+    const auto cfg = deps.satelliteManager->config().get();
+    ss << "# HELP netpulse_satellite_module_enabled Satellite Tracking layer enabled (1=yes, 0=no).\n";
+    ss << "# TYPE netpulse_satellite_module_enabled gauge\n";
+    ss << "netpulse_satellite_module_enabled " << (cfg.enabled ? 1 : 0) << "\n";
+    ss << "# HELP netpulse_satellite_computations_total Total SGP4 propagation cycles executed.\n";
+    ss << "# TYPE netpulse_satellite_computations_total counter\n";
+    ss << "netpulse_satellite_computations_total " << deps.satellitePositions->computationCount() << "\n";
+  }
+
   return ss.str();
 }
 
@@ -234,6 +245,10 @@ std::string buildOpenApiV1SpecJson(const std::string& version) {
   addOp(out, first, "/api/v1/notifications/channels/delete", "post", "Notifications", "Remover canal de notificacao", "Administrator", true, true);
   addOp(out, first, "/api/v1/notifications/test", "post", "Notifications", "Enviar notificacao de teste sincrona", "Operator+", true);
   addOp(out, first, "/api/v1/notifications/deliveries", "get", "Notifications", "Historico de entregas e falhas de notificacao", "Viewer+");
+  addOp(out, first, "/api/v1/satellites", "get", "Satellites", "Posicoes SGP4 atuais, trajetorias e configuracao dos objetos orbitais", "Viewer+");
+  addOp(out, first, "/api/v1/satellites/catalog", "get", "Satellites", "Elementos orbitais OMM/TLE em cache e estado de atualizacao", "Viewer+");
+  addOp(out, first, "/api/v1/satellites/config", "post", "Satellites", "Configurar camada Satellite Tracking, selecao e frequencia", "Operator+", true);
+  addOp(out, first, "/api/v1/satellites/refresh", "post", "Satellites", "Solicitar atualizacao assincrona dos elementos orbitais (CelesTrak)", "Operator+");
   addOp(out, first, "/metrics", "get", "Observability", "Exportador Prometheus exposition text/plain v0.0.4", "Viewer+");
   addOp(out, first, "/api/v1/openapi.json", "get", "Docs", "Especificacao OpenAPI 3.0.3 em JSON", "Viewer+");
 

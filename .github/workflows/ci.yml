@@ -24,6 +24,7 @@ jobs:
       - name: Verify frontend JS syntax
         run: |
           node --check static/topo.js
+          node --check static/satellite-overlay.js
           node --check static/map-canvas.js
           node --check static/lan-topo.js
           node --check static/noc-dashboard.js
@@ -53,6 +54,7 @@ jobs:
       - name: Verify frontend JS syntax
         run: |
           node --check static/topo.js
+          node --check static/satellite-overlay.js
           node --check static/map-canvas.js
           node --check static/lan-topo.js
           node --check static/noc-dashboard.js

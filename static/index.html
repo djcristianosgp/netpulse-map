@@ -57,6 +57,7 @@
       <button class="ctrl-btn active" id="btnTerminator" title="Alternar sombra Dia/Noite">Dia/Noite</button>
       <button class="ctrl-btn active" id="btnArcs" title="Alternar arcos geodésicos">Arcos</button>
       <button class="ctrl-btn" id="btnLan" title="Exibir anel LAN/Local no mapa">LAN</button>
+      <button class="ctrl-btn active" id="btnSatellites" title="Camada Satellite Tracking &amp; Painel Objetos Orbitais (S)">🛰 Órbitas</button>
       <button class="ctrl-btn active" id="btnLabels" title="Alternar rótulos no mapa">Rótulos</button>
       <button class="ctrl-btn active" id="btnAnimations" title="Alternar animações do mapa">Animar</button>
 
@@ -141,6 +142,66 @@
     <div class="panel-body" id="panelList"></div>
   </aside>
 
+  <!-- Satellite Tracking Side Panel ("Objetos orbitais") -->
+  <aside class="panel-left panel-sat glass hidden" id="satellitePanel" aria-label="Objetos orbitais">
+    <div class="insp-head" style="padding:10px 12px">
+      <div>
+        <div class="insp-eyebrow">SATELLITE TRACKING · SGP4</div>
+        <h2 class="insp-title">Objetos orbitais</h2>
+      </div>
+      <div style="display:flex;align-items:center;gap:5px">
+        <button type="button" class="ctrl-btn" id="btnSatRefreshCatalog" style="height:26px;padding:0 8px;font-size:11px" title="Atualizar elementos orbitais (CelesTrak OMM/TLE)">↻</button>
+        <button type="button" class="close-btn" id="btnCloseSatPanel" title="Fechar painel (Esc)">✕</button>
+      </div>
+    </div>
+
+    <div class="panel-header" style="gap:7px">
+      <label class="cat-chk-row" style="padding:6px 8px;background:rgba(15,23,42,0.72);border:1px solid rgba(56,189,248,0.2)">
+        <span style="font-weight:600;color:#f8fafc">Camada Satellite Tracking</span>
+        <input type="checkbox" id="satLayerEnabledChk" class="switch-chk" checked />
+      </label>
+
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:6px">
+        <div style="display:flex;gap:5px">
+          <button type="button" class="mini-pill-btn" id="btnSatSelectAll">Selecionar todos</button>
+          <button type="button" class="mini-pill-btn" id="btnSatDeselectAll">Desmarcar todos</button>
+        </div>
+        <span class="state-pill" id="satActiveCountPill">0 ativos</span>
+      </div>
+
+      <div class="sat-cfg-grid">
+        <label class="cat-chk-row" style="grid-column:span 2;padding:4px 7px">
+          <span>Exibir trajetória orbital</span>
+          <input type="checkbox" id="satShowTrajectoryChk" class="switch-chk" checked />
+        </label>
+        <div class="sat-cfg-field">
+          <span>Horizonte futuro</span>
+          <select id="satFutureMinutesSelect" class="ctrl-select" style="height:26px;font-size:11px">
+            <option value="45">45 min</option>
+            <option value="90" selected>90 min (1 órbita)</option>
+            <option value="180">180 min (2 órbitas)</option>
+          </select>
+        </div>
+        <div class="sat-cfg-field">
+          <span>Atualização</span>
+          <select id="satIntervalSelect" class="ctrl-select" style="height:26px;font-size:11px">
+            <option value="1000">1.0 s</option>
+            <option value="2000" selected>2.0 s</option>
+            <option value="5000">5.0 s</option>
+            <option value="10000">10.0 s</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel-body sat-panel-body">
+      <div class="insp-section-title" style="padding:2px 4px">Satélites Disponíveis</div>
+      <div id="satObjectList" class="sat-list"></div>
+      <div class="insp-section-title" style="padding:6px 4px 2px">Ficha Técnica do Objeto</div>
+      <div id="satDetailCard" class="sat-detail-card"></div>
+    </div>
+  </aside>
+
   <!-- Right Floating Inspector -->
   <aside class="panel-right glass hidden" id="inspectorPanel">
     <div class="insp-head">
@@ -172,6 +233,7 @@
       <span><i class="dot syn"></i>SYN</span>
       <span><i class="dot closed"></i>Fechando</span>
       <span><i class="dot lan"></i>LAN</span>
+      <span id="satLegendItem"><i class="dot sat"></i>Satélites</span>
     </div>
   </div>
 

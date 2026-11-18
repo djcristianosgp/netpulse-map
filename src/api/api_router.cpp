@@ -552,6 +552,138 @@ HttpResponse ApiRouter::handleHttp(const HttpRequest& req) {
     return HttpResponse{200, "application/json; charset=utf-8", deps_.history.getServiceHistoryJson(id, 60), {}};
   }
 
+  // ---- Fase 2: Network Quality Engine ----
+  if (path == "/api/quality/status" && method == "GET") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Viewer, auth);
+    if (err.statusCode != 200) return err;
+    if (!deps_.quality) return jsonError(503, "quality_unavailable");
+    return HttpResponse{200, "application/json; charset=utf-8", deps_.quality->getStatusJson(), {}};
+  }
+
+  if (path == "/api/quality/history" && method == "GET") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Viewer, auth);
+    if (err.statusCode != 200) return err;
+    std::string targetId = req.queryParam("targetId");
+    if (targetId.empty()) targetId = req.queryParam("id");
+    std::string range = req.queryParam("range");
+    if (range.empty()) range = "1h";
+    if (targetId.empty()) return jsonError(400, "missing_target_id");
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        deps_.history.queryQualityHistoryJson(targetId, range), {}};
+  }
+
+  if (path == "/api/quality/probe" && method == "POST") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Operator, auth, "quality.probe");
+    if (err.statusCode != 200) return err;
+    if (!deps_.quality) return jsonError(503, "quality_unavailable");
+    deps_.quality->probeNowAsync();
+    return HttpResponse{202, "application/json; charset=utf-8", "{\"ok\":true}", {}};
+  }
+
+  if (path == "/api/quality/rediscover" && method == "POST") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Operator, auth, "quality.rediscover");
+    if (err.statusCode != 200) return err;
+    if (!deps_.quality) return jsonError(503, "quality_unavailable");
+    deps_.quality->rediscoverInfra();
+    deps_.audit.record(auth.actor, roleToString(auth.role), req.remoteIp,
+                       "quality.rediscover", "infra", "allowed", "Redescoberta de gateway e DNS");
+    return HttpResponse{200, "application/json; charset=utf-8", deps_.quality->getStatusJson(), {}};
+  }
+
+  if (path == "/api/quality/targets" && method == "POST") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Operator, auth, "quality.target_added");
+    if (err.statusCode != 200) return err;
+    if (!deps_.quality) return jsonError(503, "quality_unavailable");
+
+    JsonValue body;
+    std::string parseErr;
+    if (!JsonValue::parse(req.body, body, parseErr) || !body.isObject()) {
+      return jsonError(400, "invalid_json", parseErr);
+    }
+    const std::string name = body.getString("name");
+    const std::string host = body.getString("host");
+    const uint16_t port = static_cast<uint16_t>(std::clamp<int64_t>(body.getInt("port", 0), 0, 65535));
+    const std::string category = body.getString("category", "custom");
+    const std::string probeMode = body.getString("probeMode", "icmp");
+    const int intervalSec = static_cast<int>(std::clamp<int64_t>(body.getInt("intervalSec", 10), 5, 300));
+
+    std::string newId, addErr;
+    if (!deps_.quality->addTarget(name, host, port, category, probeMode, intervalSec, newId, addErr)) {
+      return jsonError(400, "invalid_target", addErr);
+    }
+    deps_.audit.record(auth.actor, roleToString(auth.role), req.remoteIp,
+                       "quality.target_added", newId, "allowed", host + " (" + probeMode + ")");
+    return HttpResponse{201, "application/json; charset=utf-8",
+                        deps_.quality->getStatusJson(), {}};
+  }
+
+  if (path == "/api/quality/targets/update" && method == "POST") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Operator, auth, "quality.target_updated");
+    if (err.statusCode != 200) return err;
+    if (!deps_.quality) return jsonError(503, "quality_unavailable");
+
+    JsonValue body;
+    std::string parseErr;
+    if (!JsonValue::parse(req.body, body, parseErr) || !body.isObject()) {
+      return jsonError(400, "invalid_json", parseErr);
+    }
+    const std::string id = body.getString("id");
+    const std::string name = body.getString("name");
+    const uint16_t port = static_cast<uint16_t>(std::clamp<int64_t>(body.getInt("port", 0), 0, 65535));
+    const std::string probeMode = body.getString("probeMode");
+    const int intervalSec = static_cast<int>(std::clamp<int64_t>(body.getInt("intervalSec", 10), 5, 300));
+    const bool enabled = body.getBool("enabled", true);
+
+    std::string updErr;
+    if (!deps_.quality->updateTarget(id, name, port, probeMode, intervalSec, enabled, updErr)) {
+      return jsonError(404, "target_not_found", updErr);
+    }
+    deps_.audit.record(auth.actor, roleToString(auth.role), req.remoteIp,
+                       "quality.target_updated", id, "allowed",
+                       std::string(enabled ? "enabled" : "paused") + ", interval=" + std::to_string(intervalSec) + "s");
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        deps_.quality->getStatusJson(), {}};
+  }
+
+  if ((path == "/api/quality/targets/delete" && method == "POST") ||
+      (path == "/api/quality/targets" && method == "DELETE")) {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Operator, auth, "quality.target_removed");
+    if (err.statusCode != 200) return err;
+    if (!deps_.quality) return jsonError(503, "quality_unavailable");
+
+    std::string id;
+    bool confirmed = false;
+    if (method == "DELETE") {
+      id = req.queryParam("id");
+      confirmed = (req.queryParam("confirm") == "true" || req.queryParam("confirm") == "1");
+    } else {
+      JsonValue body;
+      std::string parseErr;
+      if (!JsonValue::parse(req.body, body, parseErr) || !body.isObject()) {
+        return jsonError(400, "invalid_json", parseErr);
+      }
+      id = body.getString("id");
+      confirmed = body.getBool("confirm", false);
+    }
+    if (!confirmed) {
+      return jsonError(400, "confirmation_required", "Confirmacao explicita obrigatoria");
+    }
+    if (id.empty() || !deps_.quality->removeTarget(id)) {
+      return jsonError(404, "target_not_found");
+    }
+    deps_.audit.record(auth.actor, roleToString(auth.role), req.remoteIp,
+                       "quality.target_removed", id, "allowed", "Alvo removido");
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        deps_.quality->getStatusJson(), {}};
+  }
+
   if (path == "/api/alerts/toggle" && method == "POST") {
     AuthContext auth;
     auto err = requireAuth(req, Role::Operator, auth, "alerts.toggled");

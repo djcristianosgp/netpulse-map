@@ -14,7 +14,7 @@ COPY third_party/ ./third_party/
 RUN mkdir -p /out && \
     gcc -O2 -DSQLITE_THREADSAFE=1 -c third_party/sqlite/sqlite3.c -o /out/sqlite3.o && \
     g++ -std=c++20 -O2 -Wall -Wextra -pthread -Isrc -Ithird_party/sqlite \
-      -DNETPULSE_VERSION=\"1.4.0\" \
+      -DNETPULSE_VERSION=\"1.5.0\" \
       src/main.cpp \
       src/core/json_lite.cpp \
       src/security/auth_manager.cpp \
@@ -32,6 +32,7 @@ RUN mkdir -p /out && \
       src/mmdb_reader.cpp \
       src/traceroute.cpp \
       src/history_store.cpp \
+      src/quality/network_quality_engine.cpp \
       src/actions.cpp \
       src/tray_host.cpp \
       /out/sqlite3.o \

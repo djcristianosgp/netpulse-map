@@ -2,6 +2,18 @@
 
 Todas as mudanças relevantes do **NetPulse** serão documentadas neste arquivo.
 
+## [1.5.0] - 2026-11-18 — Fase 2: Network Quality Engine
+
+### Adicionado
+- Módulo `NetworkQualityEngine` (`src/quality/network_quality_engine.*`) com descoberta automática de gateway local e DNS do provedor (`GetAdaptersAddresses` no Windows; `/proc/net/route` e `/etc/resolv.conf` no Linux) + alvos padrão (`1.1.1.1`, `8.8.8.8`, `9.9.9.9`, `github.com`, `www.microsoft.com`) e destinos personalizados.
+- Sondagem contínua sem invocação de shell (`icmp` via `IcmpSendEcho` no Windows ou `IPPROTO_ICMP` datagram com fallback TCP no Linux, `tcp` connect não-bloqueante e `dns_udp` RFC-1035 para medição real de resolução DNS).
+- Cálculo determinístico de métricas (`computeQualityMetrics`): atual, mínimo, máximo, média, percentis `P50`, `P90`, `P95`, `P99`, jitter (diferença absoluta consecutiva), perda de pacotes `%`, disponibilidade `%`, tempo de DNS e contagem de transições (flaps).
+- Diagnóstico determinístico (`diagnoseNetworkQuality`) diferenciando explicitamente **Fatos Observados** de **Hipóteses**, cobrindo: `gateway_unreachable`, `gateway_icmp_filtered`, `dns_unreachable`, `external_unreachable`, `high_latency`, `latency_oscillation`, `packet_loss`, `frequent_interruptions`, `progressive_degradation` e `all_checks_nominal`.
+- Migration v2 em `src/storage/sqlite_db.cpp` (`quality_targets`, `quality_samples` e índices) integrada ao escritor em lote assíncrono e retenção em `HistoryStore`.
+- APIs em `ApiRouter`: `GET /api/quality/status`, `GET /api/quality/history?targetId=...&range=15m|1h|24h|7d`, `POST /api/quality/probe`, `POST /api/quality/rediscover`, `POST /api/quality/targets`, `POST /api/quality/targets/update`, `POST /api/quality/targets/delete` / `DELETE /api/quality/targets` (Operator+ com confirmação explícita e auditoria).
+- Modal `#qualityModal` na Web UI com gráfico Canvas2D (`15m`, `1h`, `24h`, `7d`), diagnósticos e gestão de destinos.
+- Teste `testNetworkQualityMathAndDiagnosis` + extensão HTTP/RBAC em `tests/test_core.cpp`.
+
 ## [1.4.0] - 2026-11-18 — Fase 1: Histórico e Analytics (SQLite WAL)
 
 ### Adicionado

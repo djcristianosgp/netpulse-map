@@ -71,6 +71,7 @@
       </select>
       <button class="ctrl-btn" id="btnPause" title="Pausar/Retomar stream (Espaço)">Pausar</button>
       <button class="ctrl-btn" id="btnReset" title="Mostrar planeta inteiro (R)">Planeta</button>
+      <button class="ctrl-btn" id="btnQuality" title="Qualidade de Rede, Latência, Jitter, DNS &amp; Diagnóstico">📶 Qualidade</button>
       <button class="ctrl-btn" id="btnAnalytics" title="Histórico &amp; Analytics SQLite">📊 Analytics</button>
       <button class="ctrl-btn" id="btnSecurity" title="Segurança, Tokens & Auditoria">🛡 <span id="authRoleBadge">...</span></button>
       <button class="ctrl-btn" id="btnSettings" title="Configurações da aplicação">⚙</button>
@@ -431,6 +432,69 @@
 
         <div id="anaViewStorage" class="ana-view hidden">
           <div id="histStorageCard" class="notify-group"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Network Quality Engine Modal -->
+  <div id="qualityModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="qualTitle">
+    <div class="modal-card modal-card-xl glass">
+      <div class="modal-head">
+        <div>
+          <div class="insp-eyebrow">NETWORK QUALITY ENGINE · ICMP / TCP / DNS · ANÁLISE DETERMINÍSTICA</div>
+          <h2 class="insp-title" id="qualTitle">Qualidade da Internet &amp; Diagnóstico</h2>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <select id="qualRangeSelect" class="ctrl-select" style="height:28px">
+            <option value="15m">Últimos 15 min</option>
+            <option value="1h" selected>Última hora</option>
+            <option value="24h">Últimas 24 horas</option>
+            <option value="7d">Últimos 7 dias</option>
+          </select>
+          <button type="button" class="ctrl-btn" id="btnQualityProbe" style="height:28px">↻ Sondar Agora</button>
+          <button type="button" class="ctrl-btn" id="btnQualityRediscover" style="height:28px">🔄 Redescobrir</button>
+          <button class="close-btn" id="btnCloseQuality" title="Fechar (Esc)">✕</button>
+        </div>
+      </div>
+      <div class="modal-body" style="max-height:80vh;overflow-y:auto">
+        <div id="qualInfraBar" class="bw-banner" style="margin-bottom:0">Detectando gateway local e DNS do provedor...</div>
+
+        <div class="notify-group">
+          <div class="notify-cats-head" style="border-top:none;padding-top:0">
+            <span>Diagnóstico Determinístico (Fatos Observados vs. Hipóteses)</span>
+            <span id="qualOverallBadge" class="state-pill">—</span>
+          </div>
+          <div id="qualDiagnosisList" class="sec-list" style="max-height:190px"></div>
+        </div>
+
+        <div class="notify-group">
+          <div class="notify-cats-head" style="border-top:none;padding-top:0">
+            <span id="qualChartTitle">Série Histórica de Latência (Média Ciano · P95 Âmbar · Perda Vermelho)</span>
+            <span id="qualChartStats" class="sec-row-meta">Selecione um destino abaixo</span>
+          </div>
+          <canvas id="qualHistoryChart" width="880" height="150" class="svc-spark" style="height:150px"></canvas>
+        </div>
+
+        <div class="notify-group">
+          <div class="notify-cats-head" style="border-top:none;padding-top:0">
+            <span>Destinos Monitorados (Atual / Mín / Méd / Máx · P50 / P90 / P95 / P99 · Jitter · Perda · DNS)</span>
+          </div>
+          <div id="qualTargetsList" class="sec-list" style="max-height:240px"></div>
+
+          <form id="qualAddTargetForm" class="add-svc-row" style="margin-top:6px;flex-wrap:wrap">
+            <input id="qTargetName" type="text" placeholder="Nome (ex: Servidor Matriz)" maxlength="64" required style="flex:1;min-width:130px;height:30px;border-radius:7px;border:1px solid rgba(148,163,184,0.22);background:rgba(15,23,42,0.8);color:var(--text-main);padding:0 8px;font-size:12px" />
+            <input id="qTargetHost" type="text" placeholder="IP ou Hostname" maxlength="128" required style="flex:1;min-width:140px;height:30px;border-radius:7px;border:1px solid rgba(148,163,184,0.22);background:rgba(15,23,42,0.8);color:var(--text-main);padding:0 8px;font-size:12px" />
+            <select id="qTargetMode" class="ctrl-select" style="height:30px">
+              <option value="icmp">ICMP Ping</option>
+              <option value="tcp">TCP Connect</option>
+              <option value="dns">DNS Query (UDP/53)</option>
+            </select>
+            <input id="qTargetPort" type="number" min="0" max="65535" value="0" title="Porta (TCP 443, DNS 53, ICMP 0)" style="width:72px;height:30px;border-radius:7px;border:1px solid rgba(148,163,184,0.22);background:rgba(15,23,42,0.8);color:var(--text-main);padding:0 8px;font-size:12px" />
+            <input id="qTargetInterval" type="number" min="5" max="300" value="10" title="Intervalo em segundos (5..300)" style="width:72px;height:30px;border-radius:7px;border:1px solid rgba(148,163,184,0.22);background:rgba(15,23,42,0.8);color:var(--text-main);padding:0 8px;font-size:12px" />
+            <button type="submit" class="ctrl-btn active" style="height:30px">+ Adicionar Destino</button>
+          </form>
+          <div id="qualFormFeedback" class="item-geo hidden"></div>
         </div>
       </div>
     </div>

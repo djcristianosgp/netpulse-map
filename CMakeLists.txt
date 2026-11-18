@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(netpulse VERSION 1.4.0 LANGUAGES C CXX)
+project(netpulse VERSION 1.5.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,6 +26,7 @@ set(NETPULSE_CORE_SOURCES
   src/mmdb_reader.cpp
   src/traceroute.cpp
   src/history_store.cpp
+  src/quality/network_quality_engine.cpp
   src/actions.cpp
   src/tray_host.cpp
 )

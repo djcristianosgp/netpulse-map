@@ -339,6 +339,8 @@ int main(int argc, char** argv) {
   netpulse::setMinimizeToTrayEnabled(initCfg.minimizeToTray);
 
   netpulse::HistoryStore history(dataDir);
+  netpulse::NetworkQualityEngine qualityEngine(history);
+  qualityEngine.start();
   auto syncHistoryNotifications = [&](const netpulse::AppSettings& cfg) {
     history.setAlertsEnabled(cfg.alertsEnabled);
     history.setNotificationCategories(netpulse::NotificationCategories{
@@ -400,6 +402,7 @@ int main(int argc, char** argv) {
           netpulse::requestTrayQuit();
         }).detach();
       },
+      &qualityEngine,
   });
 
   const uint64_t startMs = nowMs();
@@ -558,6 +561,7 @@ int main(int argc, char** argv) {
   pollThread.request_stop();
   pollThread.join();
   tracer.stop();
+  qualityEngine.stop();
   serviceMon.stop();
   updater.stop();
   server.stop();

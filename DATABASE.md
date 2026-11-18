@@ -66,6 +66,16 @@ Agregações por bucket de tempo, aplicação e IP remoto (`PRIMARY KEY (bucket_
 Amostras agregadas da interface de rede (`PRIMARY KEY (bucket_start_ms)`):
 - `bucket_start_ms`, `rx_bytes`, `tx_bytes`, `max_rx_bps`, `max_tx_bps`, `avg_conns`, `sample_count`
 
+### `quality_targets` (Migration v2)
+Destinos configuráveis do **Network Quality Engine** (`PRIMARY KEY (id)`):
+- `id`, `name`, `host`, `port`, `category` (`gateway` | `isp_dns` | `public_dns` | `known_server` | `custom`), `probe_mode` (`icmp` | `tcp` | `dns`), `interval_sec`, `enabled`, `is_auto`, `created_at_ms`
+
+### `quality_samples` (Migration v2)
+Amostras contínuas de latência, jitter e resolução DNS:
+- `id`, `ts_ms`, `target_id`, `ok`, `rtt_ms`, `dns_ms`, `jitter_ms`, `method`, `error`
+- Índices: `idx_quality_tid_ts(target_id, ts_ms DESC)` e `idx_quality_ts(ts_ms DESC)`.
+- Limpeza automática integrada a `applyRetentionLocked()` (`WHERE ts_ms < cutoff`) e controle de teto `maxDbSizeMb`.
+
 ---
 
 ## 4. Pipeline Assíncrono & Política de Retenção (`src/history_store.*`)

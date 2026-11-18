@@ -2,6 +2,7 @@
 
 #include "../core/json_lite.hpp"
 #include "../history_store.hpp"
+#include "../quality/network_quality_engine.hpp"
 #include "../security/audit_log.hpp"
 #include "../security/auth_manager.hpp"
 #include "../security/rate_limiter.hpp"
@@ -41,6 +42,7 @@ struct ApiDependencies {
   std::function<std::string()> getLatestSnapshotJson;
   std::function<void(const AppSettings&)> onSettingsApplied;
   std::function<void()> onRequestRestart;
+  NetworkQualityEngine* quality = nullptr;
 };
 
 class ApiRouter {

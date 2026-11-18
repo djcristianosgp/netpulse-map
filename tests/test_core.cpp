@@ -25,6 +25,7 @@ inline int closesocket(int s) { return ::close(s); }
 #include "../src/history_store.hpp"
 #include "../src/mmdb_reader.hpp"
 #include "../src/net_monitor.hpp"
+#include "../src/quality/network_quality_engine.hpp"
 #include "../src/security/audit_log.hpp"
 #include "../src/security/auth_manager.hpp"
 #include "../src/security/rate_limiter.hpp"
@@ -330,6 +331,7 @@ int testLiveSecurityHttpAndWsIntegration() {
   TracerouteService tracer(geoDns);
   SettingsStore settings(tempRoot / "data" / "settings.tsv");
   HistoryStore history(tempRoot / "data");
+  NetworkQualityEngine quality(history);
   UpdateManager updater("1.3.0", nullptr);
 
   std::string snapJson = serializeSnapshotJson(snap, geoDns, 1000, 0, &svcMon);
@@ -337,7 +339,7 @@ int testLiveSecurityHttpAndWsIntegration() {
       auth, audit, authLimiter, svcMon, tracer, settings, history, updater,
       tempRoot / "data", false, false,
       [&]() { return snapJson; },
-      nullptr, nullptr,
+      nullptr, nullptr, &quality,
   });
 
   WsServer server(0, tempRoot / "static", tempRoot / "assets");
@@ -541,6 +543,48 @@ int testLiveSecurityHttpAndWsIntegration() {
           "\r\nX-CSRF-Token: " + admCsrf +
           "\r\nContent-Length: " + std::to_string(confirmJson.size()) + "\r\n\r\n" + confirmJson);
   CHECK(admPruneOk.find("200 OK") != std::string::npos);
+
+  // 13. Fase 2 Network Quality Engine endpoints + RBAC + confirm guard
+  std::string qStatResp = sendRawHttp(
+      port,
+      "GET /api/v1/quality/status HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nAuthorization: Bearer np_adm_integration_secret_987654\r\n\r\n");
+  CHECK(qStatResp.find("200 OK") != std::string::npos);
+  CHECK(qStatResp.find("\"overallHealth\":") != std::string::npos);
+
+  const std::string addTargetBody = R"({"name":"Custom DNS","host":"1.1.1.1","probeMode":"dns","port":53,"intervalSec":15})";
+  std::string viewerAddTarget = sendRawHttp(
+      port,
+      "POST /api/v1/quality/targets HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nCookie: np_session=" + viewerCookie +
+          "\r\nX-CSRF-Token: " + viewerCsrf +
+          "\r\nContent-Length: " + std::to_string(addTargetBody.size()) + "\r\n\r\n" + addTargetBody);
+  CHECK(viewerAddTarget.find("403 Forbidden") != std::string::npos);
+
+  std::string admAddTarget = sendRawHttp(
+      port,
+      "POST /api/v1/quality/targets HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nCookie: np_session=" + admCookie +
+          "\r\nX-CSRF-Token: " + admCsrf +
+          "\r\nContent-Length: " + std::to_string(addTargetBody.size()) + "\r\n\r\n" + addTargetBody);
+  CHECK(admAddTarget.find("201 Created") != std::string::npos);
+  CHECK(admAddTarget.find("Custom DNS") != std::string::npos);
+
+  std::string qHistResp = sendRawHttp(
+      port,
+      "GET /api/v1/quality/history?targetId=pub-dns-cf&range=15m HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nAuthorization: Bearer np_adm_integration_secret_987654\r\n\r\n");
+  CHECK(qHistResp.find("200 OK") != std::string::npos);
+  CHECK(qHistResp.find("\"summary\":") != std::string::npos);
+
+  const std::string delNoConfBody = R"({"id":"pub-dns-cf"})";
+  std::string delNoConfResp = sendRawHttp(
+      port,
+      "POST /api/v1/quality/targets/delete HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nCookie: np_session=" + admCookie +
+          "\r\nX-CSRF-Token: " + admCsrf +
+          "\r\nContent-Length: " + std::to_string(delNoConfBody.size()) + "\r\n\r\n" + delNoConfBody);
+  CHECK(delNoConfResp.find("confirmation_required") != std::string::npos);
 
   server.stop();
   std::filesystem::remove_all(tempRoot, ec);
@@ -836,7 +880,7 @@ int testSqliteMigrationsAndTsvImport() {
     std::string stats = hist.getStorageStatsJson();
     CHECK(stats.find("\"journalMode\":\"wal\"") != std::string::npos);
     CHECK(stats.find("\"integrityOk\":true") != std::string::npos);
-    CHECK(stats.find("\"schemaVersion\":1") != std::string::npos);
+    CHECK(stats.find("\"schemaVersion\":2") != std::string::npos);
 
     std::string evJson = hist.getEventsJson(50, 0, "warn", "");
     CHECK(evJson.find("Legacy SSH") != std::string::npos);
@@ -993,6 +1037,174 @@ int testHistoryAnalyticsAndRetention() {
   return 0;
 }
 
+int testNetworkQualityMathAndDiagnosis() {
+  // 1. DNS query packet build + header validation
+  auto pkt = buildDnsQueryPacket(0x1234, "one.one.one.one");
+  CHECK(pkt.size() > 16);
+  CHECK(pkt[0] == 0x12 && pkt[1] == 0x34);
+  uint8_t rcode = 99;
+  // Query packet (QR=0) must be rejected as response
+  CHECK(!parseDnsResponseHeader(pkt.data(), pkt.size(), 0x1234, rcode));
+  std::vector<uint8_t> respPkt = pkt;
+  respPkt[2] = 0x81; // QR=1, RD=1
+  respPkt[3] = 0x80; // RCODE=0
+  CHECK(parseDnsResponseHeader(respPkt.data(), respPkt.size(), 0x1234, rcode));
+  CHECK(rcode == 0);
+  CHECK(!parseDnsResponseHeader(respPkt.data(), respPkt.size(), 0x9999, rcode));
+
+  // 2. Percentiles, jitter, packet loss, flapping, and half-window trend
+  const uint64_t tBase = 1700000000000ULL;
+  std::vector<QualitySampleRecord> samples;
+  const double rtts[] = {10.0, 12.0, 11.0, 14.0, 13.0, 40.0, 45.0, 50.0, 60.0, 100.0};
+  for (size_t i = 0; i < 10; ++i) {
+    QualitySampleRecord s;
+    s.tsMs = tBase + i * 10000ULL;
+    s.targetId = "test-ext";
+    s.ok = (i != 2); // 1 loss out of 10 = 10% loss
+    s.rttMs = s.ok ? rtts[i] : 0.0;
+    s.dnsMs = 4.0;
+    samples.push_back(s);
+  }
+  auto m = computeQualityMetrics(samples);
+  CHECK(m.sampleCount == 10);
+  CHECK(m.okCount == 9);
+  CHECK(m.packetLossPct > 9.9 && m.packetLossPct < 10.1);
+  CHECK(m.availabilityPct > 89.9 && m.availabilityPct < 90.1);
+  CHECK(m.minLatencyMs == 10.0);
+  CHECK(m.maxLatencyMs == 100.0);
+  CHECK(m.p50Ms >= 30.0 && m.p50Ms <= 45.0);
+  CHECK(m.p95Ms >= 80.0);
+  CHECK(m.p99Ms >= 90.0);
+  CHECK(m.jitterMs > 5.0);
+  CHECK(m.recentHalfAvgMs > m.olderHalfAvgMs + 30.0);
+  CHECK(m.flaps == 2);
+
+  // 3. Deterministic diagnosis rules (gateway unreachable, dns unreachable, external patterns, nominal)
+  {
+    QualityTargetSnapshot gw;
+    gw.target = {"gw", "Gateway", "192.168.1.1", 0, "gateway", "icmp", 10, true, true, 0};
+    gw.status = "down";
+    gw.metrics.sampleCount = 6;
+    gw.metrics.okCount = 0;
+    gw.metrics.packetLossPct = 100.0;
+    gw.metrics.availabilityPct = 0.0;
+    auto diagGw = diagnoseNetworkQuality({gw});
+    CHECK(diagGw.overallHealth == "critical");
+    CHECK(!diagGw.findings.empty());
+    CHECK(diagGw.findings[0].code == "gateway_unreachable");
+    CHECK(!diagGw.findings[0].observedFacts.empty());
+    CHECK(!diagGw.findings[0].hypotheses.empty());
+
+    // Gateway ICMP filtered while upstream DNS is healthy -> informative, NOT critical
+    QualityTargetSnapshot upstreamOk;
+    upstreamOk.target = {"dns-up", "CF", "1.1.1.1", 53, "public_dns", "dns", 10, true, false, 0};
+    upstreamOk.status = "ok";
+    upstreamOk.metrics.sampleCount = 6;
+    upstreamOk.metrics.okCount = 6;
+    upstreamOk.metrics.availabilityPct = 100.0;
+    upstreamOk.metrics.p50Ms = 15.0;
+    auto diagFiltered = diagnoseNetworkQuality({gw, upstreamOk});
+    CHECK(diagFiltered.overallHealth == "healthy");
+    CHECK(!diagFiltered.findings.empty());
+    CHECK(diagFiltered.findings[0].code == "gateway_icmp_filtered");
+    CHECK(diagFiltered.findings[0].severity == "info");
+  }
+
+  {
+    QualityTargetSnapshot gwOk;
+    gwOk.target = {"gw", "Gateway", "192.168.1.1", 0, "gateway", "icmp", 10, true, true, 0};
+    gwOk.status = "ok";
+    gwOk.metrics.sampleCount = 10;
+    gwOk.metrics.okCount = 10;
+    gwOk.metrics.p50Ms = 1.5;
+    gwOk.metrics.p95Ms = 2.0;
+    gwOk.metrics.availabilityPct = 100.0;
+
+    QualityTargetSnapshot ispDnsBad;
+    ispDnsBad.target = {"dns", "ISP DNS", "200.1.1.1", 53, "isp_dns", "dns", 10, true, true, 0};
+    ispDnsBad.status = "down";
+    ispDnsBad.metrics.sampleCount = 10;
+    ispDnsBad.metrics.okCount = 3;
+    ispDnsBad.metrics.packetLossPct = 70.0;
+    ispDnsBad.metrics.availabilityPct = 30.0;
+
+    QualityTargetSnapshot degradedExt;
+    degradedExt.target = {"ext", "Ext Host", "github.com", 443, "known_server", "tcp", 10, true, false, 0};
+    degradedExt.status = "degraded";
+    degradedExt.metrics.sampleCount = 10;
+    degradedExt.metrics.okCount = 9;
+    degradedExt.metrics.avgLatencyMs = 150.0;
+    degradedExt.metrics.p50Ms = 110.0;
+    degradedExt.metrics.p95Ms = 210.0;
+    degradedExt.metrics.jitterMs = 35.0;
+    degradedExt.metrics.packetLossPct = 10.0;
+    degradedExt.metrics.availabilityPct = 90.0;
+    degradedExt.metrics.flaps = 4;
+    degradedExt.metrics.olderHalfAvgMs = 40.0;
+    degradedExt.metrics.recentHalfAvgMs = 180.0;
+    degradedExt.metrics.olderHalfAvailPct = 100.0;
+    degradedExt.metrics.recentHalfAvailPct = 80.0;
+
+    auto rep = diagnoseNetworkQuality({gwOk, ispDnsBad, degradedExt});
+    CHECK(rep.overallHealth == "critical");
+    auto hasCode = [&](const std::string& code) {
+      for (const auto& f : rep.findings) {
+        if (f.code == code) return true;
+      }
+      return false;
+    };
+    CHECK(hasCode("dns_unreachable"));
+    CHECK(hasCode("packet_loss"));
+    CHECK(hasCode("high_latency"));
+    CHECK(hasCode("latency_oscillation"));
+    CHECK(hasCode("frequent_interruptions"));
+    CHECK(hasCode("progressive_degradation"));
+  }
+
+  // 4. SQLite persistence + bucketed history query + retention prune for quality_samples
+  auto qDir = std::filesystem::temp_directory_path() / "netpulse_quality_sqlite_test";
+  std::error_code ec;
+  std::filesystem::remove_all(qDir, ec);
+  {
+    HistoryStore hist(qDir);
+    NetworkQualityEngine engine(hist);
+    std::string newId, err;
+    CHECK(engine.addTarget("Loopback Test", "127.0.0.1", 0, "custom", "icmp", 10, newId, err));
+
+    const uint64_t nowMs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+
+    hist.enqueueQualitySample({nowMs - 20ULL * 86400000ULL, newId, true, 5.0, 0.0, 0.0, "icmp", ""});
+    hist.enqueueQualitySample({nowMs - 60000ULL, newId, true, 12.0, 2.5, 0.0, "icmp", ""});
+    hist.enqueueQualitySample({nowMs - 30000ULL, newId, true, 18.0, 3.5, 6.0, "icmp", ""});
+    hist.enqueueQualitySample({nowMs - 10000ULL, newId, false, 0.0, 0.0, 0.0, "icmp", "timeout"});
+    hist.flushNow();
+
+    std::string hist1h = hist.queryQualityHistoryJson(newId, "1h");
+    CHECK(hist1h.find("\"samples\":3") != std::string::npos);
+    CHECK(hist1h.find("\"okSamples\":2") != std::string::npos);
+    CHECK(hist1h.find("\"p95Ms\":") != std::string::npos);
+
+    std::string stJson = hist.getStorageStatsJson();
+    CHECK(stJson.find("\"qualitySamples\":4") != std::string::npos);
+
+    hist.setRetentionConfig(7, 128);
+    CHECK(hist.pruneNow());
+    std::string stAfter = hist.getStorageStatsJson();
+    CHECK(stAfter.find("\"qualitySamples\":3") != std::string::npos);
+
+    auto infra = discoverNetworkInfra();
+    (void)infra;
+    hist.stop();
+  }
+  std::filesystem::remove_all(qDir, ec);
+
+  std::cout << "[PASS] testNetworkQualityMathAndDiagnosis\n";
+  return 0;
+}
+
 int main() {
 #ifdef _WIN32
   WSADATA wsa{};
@@ -1014,6 +1226,7 @@ int main() {
   rc |= testSettingsStorePersistence();
   rc |= testSqliteMigrationsAndTsvImport();
   rc |= testHistoryAnalyticsAndRetention();
+  rc |= testNetworkQualityMathAndDiagnosis();
 
 #ifdef _WIN32
   WSACleanup();

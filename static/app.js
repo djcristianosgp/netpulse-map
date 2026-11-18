@@ -65,6 +65,11 @@ const state = {
     connLimit: 30,
     connTotal: 0,
   },
+  quality: {
+    range: '1h',
+    selectedTargetId: null,
+    timer: null,
+  },
   auth: {
     authenticated: false,
     role: 'none',
@@ -1452,7 +1457,9 @@ async function init() {
   window.addEventListener('keydown', (e) => {
     const inInput = document.activeElement === $('searchInput');
     if (e.key === 'Escape') {
-      if (!$('analyticsModal').classList.contains('hidden')) {
+      if (!$('qualityModal').classList.contains('hidden')) {
+        closeQualityModal();
+      } else if (!$('analyticsModal').classList.contains('hidden')) {
         closeAnalyticsModal();
       } else if (!$('securityModal').classList.contains('hidden')) {
         closeSecurityModal();
@@ -1557,6 +1564,58 @@ async function init() {
     if (e.key === 'Enter') {
       e.preventDefault();
       loadAnalyticsProcesses();
+    }
+  });
+
+  $('btnQuality').addEventListener('click', openQualityModal);
+  $('btnCloseQuality').addEventListener('click', closeQualityModal);
+  $('qualityModal').addEventListener('click', (e) => {
+    if (e.target === $('qualityModal')) closeQualityModal();
+  });
+  $('qualRangeSelect').addEventListener('change', () => {
+    state.quality.range = $('qualRangeSelect').value;
+    loadQualityHistory();
+  });
+  $('btnQualityProbe').addEventListener('click', async () => {
+    await apiFetch('/api/quality/probe', { method: 'POST' });
+    setTimeout(loadQualityStatus, 650);
+  });
+  $('btnQualityRediscover').addEventListener('click', async () => {
+    const resp = await apiFetch('/api/quality/rediscover', { method: 'POST' });
+    if (resp.ok) {
+      await loadQualityStatus();
+    }
+  });
+  $('qualAddTargetForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fb = $('qualFormFeedback');
+    fb.classList.remove('hidden');
+    fb.textContent = 'Adicionando destino...';
+    const payload = {
+      name: $('qTargetName').value.trim(),
+      host: $('qTargetHost').value.trim(),
+      probeMode: $('qTargetMode').value,
+      port: parseInt($('qTargetPort').value, 10) || 0,
+      intervalSec: Math.max(5, Math.min(300, parseInt($('qTargetInterval').value, 10) || 10)),
+      category: 'custom',
+    };
+    try {
+      const resp = await apiFetch('/api/quality/targets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        fb.textContent = `Erro: ${err.message || err.error || resp.status}`;
+        return;
+      }
+      $('qTargetName').value = '';
+      $('qTargetHost').value = '';
+      fb.classList.add('hidden');
+      await loadQualityStatus();
+    } catch {
+      fb.textContent = 'Falha ao comunicar com o motor local.';
     }
   });
 
@@ -2090,6 +2149,243 @@ async function loadAnalyticsStorage() {
         }
       };
     }
+  } catch {}
+}
+
+function openQualityModal() {
+  $('qualityModal').classList.remove('hidden');
+  loadQualityStatus();
+  if (state.quality.timer) clearInterval(state.quality.timer);
+  state.quality.timer = setInterval(() => {
+    if (!$('qualityModal').classList.contains('hidden')) {
+      loadQualityStatus();
+    }
+  }, 5000);
+}
+
+function closeQualityModal() {
+  $('qualityModal').classList.add('hidden');
+  if (state.quality.timer) {
+    clearInterval(state.quality.timer);
+    state.quality.timer = null;
+  }
+}
+
+function renderQualityChart(series) {
+  const canvas = $('qualHistoryChart');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  if (!series || series.length === 0) {
+    ctx.fillStyle = 'rgba(148, 163, 184, 0.72)';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Aguardando amostras históricas para este destino e janela.', w / 2, h / 2);
+    return;
+  }
+
+  let maxMs = 10;
+  for (const pt of series) {
+    maxMs = Math.max(maxMs, Number(pt.p95Ms) || 0, Number(pt.avgMs) || 0);
+  }
+  maxMs *= 1.15;
+
+  const padL = 42;
+  const padR = 14;
+  const padT = 14;
+  const padB = 22;
+  const plotW = w - padL - padR;
+  const plotH = h - padT - padB;
+
+  ctx.strokeStyle = 'rgba(148, 163, 184, 0.16)';
+  ctx.lineWidth = 1;
+  for (let g = 0; g <= 3; g++) {
+    const y = padT + (plotH * g) / 3;
+    ctx.beginPath();
+    ctx.moveTo(padL, y);
+    ctx.lineTo(padL + plotW, y);
+    ctx.stroke();
+    const lblVal = maxMs * (1 - g / 3);
+    ctx.fillStyle = 'rgba(148, 163, 184, 0.78)';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText(`${lblVal.toFixed(0)}ms`, padL - 5, y + 3);
+  }
+
+  const xOf = (idx) => (series.length === 1 ? padL + plotW / 2 : padL + (idx / (series.length - 1)) * plotW);
+  const yOf = (val) => padT + plotH - Math.min(1, Math.max(0, (Number(val) || 0) / maxMs)) * plotH;
+
+  // P95 amber line
+  ctx.strokeStyle = '#fbbf24';
+  ctx.lineWidth = 1.6;
+  ctx.beginPath();
+  series.forEach((pt, idx) => {
+    const x = xOf(idx);
+    const y = yOf(pt.p95Ms);
+    if (idx === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Avg cyan line
+  ctx.strokeStyle = '#38bdf8';
+  ctx.lineWidth = 2.2;
+  ctx.beginPath();
+  series.forEach((pt, idx) => {
+    const x = xOf(idx);
+    const y = yOf(pt.avgMs);
+    if (idx === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+
+  // Loss markers
+  series.forEach((pt, idx) => {
+    if ((Number(pt.lossPct) || 0) > 0) {
+      ctx.fillStyle = '#f87171';
+      ctx.beginPath();
+      ctx.arc(xOf(idx), padT + plotH - 4, 3.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  });
+
+  // Start & end time labels
+  ctx.fillStyle = 'rgba(148, 163, 184, 0.78)';
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(new Date(series[0].ts).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }), padL, h - 6);
+  ctx.textAlign = 'right';
+  ctx.fillText(new Date(series[series.length - 1].ts).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }), padL + plotW, h - 6);
+}
+
+async function loadQualityHistory() {
+  const tid = state.quality.selectedTargetId;
+  if (!tid) {
+    renderQualityChart([]);
+    return;
+  }
+  try {
+    const resp = await apiFetch(`/api/quality/history?targetId=${encodeURIComponent(tid)}&range=${encodeURIComponent(state.quality.range)}`);
+    if (!resp.ok) return;
+    const d = await resp.json();
+    const s = d.summary || {};
+    $('qualChartStats').textContent = `${Number(s.samples || 0)} amostras · P50 ${Number(s.p50Ms || 0).toFixed(1)}ms · P95 ${Number(s.p95Ms || 0).toFixed(1)}ms · Perda ${Number(s.lossPct || 0).toFixed(1)}%`;
+    renderQualityChart(d.series || []);
+  } catch {}
+}
+
+async function loadQualityStatus() {
+  try {
+    const resp = await apiFetch('/api/quality/status');
+    if (!resp.ok) return;
+    const d = await resp.json();
+    const infra = d.infra || {};
+    const gwText = (infra.gateways && infra.gateways.length) ? infra.gateways.join(', ') : 'não detectado';
+    const dnsText = (infra.dnsServers && infra.dnsServers.length) ? infra.dnsServers.join(', ') : 'não detectado';
+    $('qualInfraBar').innerHTML = `<span>Gateway Local: <strong>${escHtml(gwText)}</strong> · DNS do Provedor/Sistema: <strong>${escHtml(dnsText)}</strong></span><span class="sec-row-meta">Atualização contínua (5s)</span>`;
+
+    const diag = d.diagnosis || {};
+    const health = diag.overallHealth || 'unknown';
+    const badge = $('qualOverallBadge');
+    badge.textContent = health.toUpperCase();
+    badge.className = `state-pill ${health === 'critical' ? 'closed' : health === 'degraded' ? 'syn' : 'new'}`;
+
+    const findings = diag.findings || [];
+    $('qualDiagnosisList').innerHTML = findings.length === 0
+      ? '<div class="sec-row"><span class="sec-row-meta">Coletando primeiras amostras...</span></div>'
+      : findings.map((f) => `
+        <div class="diag-card ${escHtml(f.severity || 'info')}">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <strong>${escHtml(f.title)}</strong>
+            <span class="state-pill ${f.severity === 'critical' ? 'closed' : f.severity === 'warn' ? 'syn' : 'new'}">${escHtml(f.code)}</span>
+          </div>
+          ${(f.observedFacts || []).length ? `<div class="sec-row-meta"><strong>Fatos observados:</strong> ${(f.observedFacts || []).map(escHtml).join(' | ')}</div>` : ''}
+          ${(f.hypotheses || []).length ? `<div class="sec-row-meta" style="color:#cbd5e1"><strong>Diagnóstico:</strong> ${(f.hypotheses || []).map(escHtml).join(' ')}</div>` : ''}
+        </div>`).join('');
+
+    const targets = d.targets || [];
+    if (!state.quality.selectedTargetId || !targets.some((t) => t.id === state.quality.selectedTargetId)) {
+      state.quality.selectedTargetId = targets.length ? targets[0].id : null;
+    }
+
+    const canEdit = hasRole('operator');
+    $('qualAddTargetForm').classList.toggle('hidden', !canEdit);
+    $('btnQualityProbe').disabled = !canEdit;
+    $('btnQualityRediscover').disabled = !canEdit;
+
+    $('qualTargetsList').innerHTML = targets.length === 0
+      ? '<div class="sec-row"><span class="sec-row-meta">Nenhum alvo configurado.</span></div>'
+      : targets.map((t) => {
+        const m = t.metrics || {};
+        const sel = t.id === state.quality.selectedTargetId;
+        const pillCls = t.status === 'down' ? 'closed' : t.status === 'degraded' ? 'syn' : t.status === 'ok' ? 'new' : '';
+        return `
+          <div class="sec-row qual-row ${sel ? 'selected' : ''}" data-qid="${escHtml(t.id)}">
+            <div style="min-width:0;flex:1">
+              <div><strong>${escHtml(t.name)}</strong> <span class="sec-row-meta">${escHtml(t.host)}${t.port ? ':' + Number(t.port) : ''} · ${escHtml(t.methodUsed || t.probeMode)} (${Number(t.intervalSec)}s) ${t.enabled ? '' : '· PAUSADO'}</span></div>
+              <div class="sec-row-meta">Atual ${Number(m.currentMs || 0).toFixed(1)}ms · Mín ${Number(m.minMs || 0).toFixed(1)} · Méd ${Number(m.avgMs || 0).toFixed(1)} · Máx ${Number(m.maxMs || 0).toFixed(1)} | P50 ${Number(m.p50Ms || 0).toFixed(1)} · P90 ${Number(m.p90Ms || 0).toFixed(1)} · P95 ${Number(m.p95Ms || 0).toFixed(1)} · P99 ${Number(m.p99Ms || 0).toFixed(1)} | Jitter ${Number(m.jitterMs || 0).toFixed(1)}ms · Perda ${Number(m.lossPct || 0).toFixed(1)}% · Disp ${Number(m.availabilityPct || 0).toFixed(1)}% · DNS ${Number(m.avgDnsMs || 0).toFixed(1)}ms</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:5px;flex-shrink:0">
+              <span class="state-pill ${pillCls}">${escHtml(t.status)}</span>
+              ${canEdit ? `<button type="button" class="mini-pill-btn q-toggle" data-id="${escHtml(t.id)}" data-en="${t.enabled ? '1' : '0'}">${t.enabled ? 'Pausar' : 'Ativar'}</button>` : ''}
+              ${canEdit && !t.isAuto ? `<button type="button" class="mini-pill-btn q-del" data-id="${escHtml(t.id)}">✕</button>` : ''}
+            </div>
+          </div>`;
+      }).join('');
+
+    document.querySelectorAll('.qual-row[data-qid]').forEach((row) => {
+      row.onclick = (e) => {
+        if (e.target.closest('button')) return;
+        state.quality.selectedTargetId = row.getAttribute('data-qid');
+        const tObj = targets.find((x) => x.id === state.quality.selectedTargetId);
+        if (tObj) $('qualChartTitle').textContent = `Série Histórica — ${tObj.name} (${tObj.host})`;
+        document.querySelectorAll('.qual-row').forEach((r) => r.classList.toggle('selected', r === row));
+        loadQualityHistory();
+      };
+    });
+
+    document.querySelectorAll('.q-toggle').forEach((btn) => {
+      btn.onclick = async () => {
+        const id = btn.getAttribute('data-id');
+        const nextEn = btn.getAttribute('data-en') !== '1';
+        const tObj = targets.find((x) => x.id === id);
+        await apiFetch('/api/quality/targets/update', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id,
+            name: tObj ? tObj.name : '',
+            port: tObj ? tObj.port : 0,
+            probeMode: tObj ? tObj.probeMode : 'icmp',
+            intervalSec: tObj ? tObj.intervalSec : 10,
+            enabled: nextEn,
+          }),
+        });
+        loadQualityStatus();
+      };
+    });
+
+    document.querySelectorAll('.q-del').forEach((btn) => {
+      btn.onclick = async () => {
+        const id = btn.getAttribute('data-id');
+        if (!window.confirm('Remover este destino monitorado e seu histórico?')) return;
+        await apiFetch('/api/quality/targets/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id, confirm: true }),
+        });
+        loadQualityStatus();
+      };
+    });
+
+    const curTarget = targets.find((x) => x.id === state.quality.selectedTargetId);
+    if (curTarget) {
+      $('qualChartTitle').textContent = `Série Histórica — ${curTarget.name} (${curTarget.host})`;
+    }
+    await loadQualityHistory();
   } catch {}
 }
 

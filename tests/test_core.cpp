@@ -21,6 +21,7 @@ inline int closesocket(int s) { return ::close(s); }
 #include "../src/actions.hpp"
 #include "../src/api/api_router.hpp"
 #include "../src/core/json_lite.hpp"
+#include "../src/discovery/discovery_engine.hpp"
 #include "../src/geo_dns.hpp"
 #include "../src/history_store.hpp"
 #include "../src/mmdb_reader.hpp"
@@ -334,6 +335,7 @@ int testLiveSecurityHttpAndWsIntegration() {
   TracerouteService tracer(geoDns, &history);
   NetworkQualityEngine quality(history);
   InterfaceMonitor ifMon(&history);
+  DiscoveryEngine discovery(history, ifMon);
   UpdateManager updater("1.3.0", nullptr);
 
   std::string snapJson = serializeSnapshotJson(snap, geoDns, 1000, 0, &svcMon);
@@ -341,7 +343,7 @@ int testLiveSecurityHttpAndWsIntegration() {
       auth, audit, authLimiter, svcMon, tracer, settings, history, updater,
       tempRoot / "data", false, false,
       [&]() { return snapJson; },
-      nullptr, nullptr, &quality, &ifMon,
+      nullptr, nullptr, &quality, &ifMon, &discovery,
   });
 
   WsServer server(0, tempRoot / "static", tempRoot / "assets");
@@ -658,6 +660,30 @@ int testLiveSecurityHttpAndWsIntegration() {
   CHECK(ifHist.find("200 OK") != std::string::npos);
   CHECK(ifHist.find("\"series\":") != std::string::npos);
 
+  // 16. Fase 5 Discovery Engine endpoints + RBAC + confirm guard
+  std::string discGet = sendRawHttp(
+      port,
+      "GET /api/v1/discovery/devices HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nAuthorization: Bearer np_adm_integration_secret_987654\r\n\r\n");
+  CHECK(discGet.find("200 OK") != std::string::npos);
+  CHECK(discGet.find("\"devices\":") != std::string::npos);
+
+  std::string viewerScan = sendRawHttp(
+      port,
+      "POST /api/v1/discovery/scan HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nCookie: np_session=" + viewerCookie +
+          "\r\nX-CSRF-Token: " + viewerCsrf + "\r\nContent-Length: 0\r\n\r\n");
+  CHECK(viewerScan.find("403 Forbidden") != std::string::npos);
+
+  const std::string discDelNoConf = R"({"deviceKey":"AA:BB:CC:DD:EE:FF"})";
+  std::string discDelResp = sendRawHttp(
+      port,
+      "POST /api/v1/discovery/devices/delete HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nCookie: np_session=" + admCookie +
+          "\r\nX-CSRF-Token: " + admCsrf +
+          "\r\nContent-Length: " + std::to_string(discDelNoConf.size()) + "\r\n\r\n" + discDelNoConf);
+  CHECK(discDelResp.find("confirmation_required") != std::string::npos);
+
   server.stop();
   std::filesystem::remove_all(tempRoot, ec);
   std::cout << "[PASS] testLiveSecurityHttpAndWsIntegration\n";
@@ -952,7 +978,7 @@ int testSqliteMigrationsAndTsvImport() {
     std::string stats = hist.getStorageStatsJson();
     CHECK(stats.find("\"journalMode\":\"wal\"") != std::string::npos);
     CHECK(stats.find("\"integrityOk\":true") != std::string::npos);
-    CHECK(stats.find("\"schemaVersion\":4") != std::string::npos);
+    CHECK(stats.find("\"schemaVersion\":5") != std::string::npos);
 
     std::string evJson = hist.getEventsJson(50, 0, "warn", "");
     CHECK(evJson.find("Legacy SSH") != std::string::npos);
@@ -1486,6 +1512,93 @@ int testMultiWanAndInterfaces() {
   return 0;
 }
 
+int testDiscoveryEngineAndOui() {
+  // 1. MAC normalization, LAA randomized bit detection & OUI lookup
+  CHECK(normalizeMacUpper("b8-69-f4-11-22-33") == "B8:69:F4:11:22:33");
+  CHECK(lookupOuiVendor("b8:69:f4:01:02:03") == "MikroTik");
+  CHECK(lookupOuiVendor("18-e8-29-aa-bb-cc") == "Ubiquiti");
+  CHECK(lookupOuiVendor("24:0a:c4:99:88:77") == "Espressif IoT");
+  CHECK(isLocallyAdministeredMac("02:11:22:33:44:55"));
+  CHECK(!isLocallyAdministeredMac("B8:69:F4:01:02:03"));
+  CHECK(lookupOuiVendor("02:AA:BB:CC:DD:EE") == "MAC Privado / Randomizado");
+
+  // 2. Deterministic device type inference
+  CHECK(inferDeviceType(true, false, "", "", {}) == "Estação Local");
+  CHECK(inferDeviceType(false, true, "MikroTik", "", {}) == "Roteador / Gateway");
+  CHECK(inferDeviceType(false, false, "", "", {9100}) == "Impressora");
+  CHECK(inferDeviceType(false, false, "Intelbras", "", {554}) == "Câmera / NVR");
+  CHECK(inferDeviceType(false, false, "VMware", "", {}) == "Máquina Virtual");
+  CHECK(inferDeviceType(false, false, "Synology", "", {22, 445}) == "Servidor / NAS");
+
+  // 3. Subnet enumeration (.1 .. .254, capped cleanly)
+  auto hosts = enumerateSubnetHosts("192.168.10.55/24");
+  CHECK(hosts.size() == 254);
+  CHECK(hosts.front() == "192.168.10.1");
+  CHECK(hosts.back() == "192.168.10.254");
+
+  // 4. SQLite persistence, labeling, passive harvest & retention pruning
+  auto dDir = std::filesystem::temp_directory_path() / "netpulse_discovery_sqlite_test";
+  std::error_code ec;
+  std::filesystem::remove_all(dDir, ec);
+  {
+    HistoryStore hist(dDir);
+    InterfaceMonitor ifMon(&hist);
+    DiscoveryEngine eng(hist, ifMon);
+
+    const uint64_t nowMs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+
+    LanDeviceRecord devOld;
+    devOld.deviceKey = "AA:BB:CC:11:22:33";
+    devOld.ip = "192.168.2.99";
+    devOld.mac = "AA:BB:CC:11:22:33";
+    devOld.vendor = "Apple";
+    devOld.deviceType = "Dispositivo Móvel";
+    devOld.online = false;
+    devOld.firstSeenMs = nowMs - 20ULL * 86400000ULL;
+    devOld.lastSeenMs = nowMs - 20ULL * 86400000ULL;
+
+    LanDeviceRecord devNew;
+    devNew.deviceKey = "B8:69:F4:AA:BB:CC";
+    devNew.ip = "192.168.2.1";
+    devNew.mac = "B8:69:F4:AA:BB:CC";
+    devNew.vendor = "MikroTik";
+    devNew.deviceType = "Roteador / Gateway";
+    devNew.isGateway = true;
+    devNew.online = true;
+    devNew.openPorts = "53,80,443";
+    devNew.firstSeenMs = nowMs - 1000;
+    devNew.lastSeenMs = nowMs;
+
+    CHECK(hist.upsertLanDevices({devOld, devNew}, false));
+    CHECK(hist.setLanDeviceLabel("B8:69:F4:AA:BB:CC", "Core Router"));
+
+    CHECK(eng.runPassiveRefresh());
+    std::string j = eng.getDevicesJson();
+    CHECK(j.find("Core Router") != std::string::npos);
+    CHECK(j.find("MikroTik") != std::string::npos);
+
+    hist.setRetentionConfig(7, 128);
+    CHECK(hist.pruneNow());
+    auto loaded = hist.loadLanDevices();
+    bool hasOld = false, hasNew = false;
+    for (const auto& d : loaded) {
+      if (d.deviceKey == "AA:BB:CC:11:22:33") hasOld = true;
+      if (d.deviceKey == "B8:69:F4:AA:BB:CC") hasNew = true;
+    }
+    CHECK(!hasOld);
+    CHECK(hasNew);
+    eng.stop();
+    hist.stop();
+  }
+  std::filesystem::remove_all(dDir, ec);
+
+  std::cout << "[PASS] testDiscoveryEngineAndOui\n";
+  return 0;
+}
+
 int main() {
 #ifdef _WIN32
   WSADATA wsa{};
@@ -1510,6 +1623,7 @@ int main() {
   rc |= testNetworkQualityMathAndDiagnosis();
   rc |= testTracerouteHistoryAndRouteDiff();
   rc |= testMultiWanAndInterfaces();
+  rc |= testDiscoveryEngineAndOui();
 
 #ifdef _WIN32
   WSACleanup();

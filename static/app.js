@@ -80,6 +80,11 @@ const state = {
     selectedId: null,
     timer: null,
   },
+  discovery: {
+    filter: 'all',
+    search: '',
+    timer: null,
+  },
   auth: {
     authenticated: false,
     role: 'none',
@@ -1475,7 +1480,9 @@ async function init() {
   window.addEventListener('keydown', (e) => {
     const inInput = document.activeElement === $('searchInput');
     if (e.key === 'Escape') {
-      if (!$('interfacesModal').classList.contains('hidden')) {
+      if (!$('discoveryModal').classList.contains('hidden')) {
+        closeDiscoveryModal();
+      } else if (!$('interfacesModal').classList.contains('hidden')) {
         closeInterfacesModal();
       } else if (!$('traceModal').classList.contains('hidden')) {
         closeTraceModal();
@@ -1711,6 +1718,31 @@ async function init() {
       await apiFetch('/api/interfaces/refresh', { method: 'POST' });
     }
     await loadInterfacesData();
+  });
+
+  $('btnDiscovery').addEventListener('click', openDiscoveryModal);
+  $('btnCloseDiscovery').addEventListener('click', closeDiscoveryModal);
+  $('discoveryModal').addEventListener('click', (e) => {
+    if (e.target === $('discoveryModal')) closeDiscoveryModal();
+  });
+  $('discSearchInput').addEventListener('input', () => {
+    state.discovery.search = $('discSearchInput').value.trim().toLowerCase();
+    loadDiscoveryDevices();
+  });
+  $('discFilterSelect').addEventListener('change', () => {
+    state.discovery.filter = $('discFilterSelect').value;
+    loadDiscoveryDevices();
+  });
+  $('btnDiscoveryRefresh').addEventListener('click', loadDiscoveryDevices);
+  $('btnDiscoveryScan').addEventListener('click', async () => {
+    $('btnDiscoveryScan').disabled = true;
+    $('btnDiscoveryScan').textContent = '⏳ Varrendo LAN...';
+    await apiFetch('/api/discovery/scan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    setTimeout(loadDiscoveryDevices, 900);
   });
 
   $('authForm').addEventListener('submit', async (e) => {
@@ -2810,6 +2842,122 @@ async function loadInterfacesData() {
     const curObj = all.find((x) => x.id === state.interfaces.selectedId);
     if (curObj) $('ifaceChartTitle').textContent = `Histórico — ${curObj.name} (${curObj.type})`;
     await loadInterfaceHistory();
+  } catch {}
+}
+
+function openDiscoveryModal() {
+  $('discoveryModal').classList.remove('hidden');
+  loadDiscoveryDevices();
+  if (state.discovery.timer) clearInterval(state.discovery.timer);
+  state.discovery.timer = setInterval(() => {
+    if (!$('discoveryModal').classList.contains('hidden')) {
+      loadDiscoveryDevices();
+    }
+  }, 4000);
+}
+
+function closeDiscoveryModal() {
+  $('discoveryModal').classList.add('hidden');
+  if (state.discovery.timer) {
+    clearInterval(state.discovery.timer);
+    state.discovery.timer = null;
+  }
+}
+
+async function loadDiscoveryDevices() {
+  try {
+    const resp = await apiFetch('/api/discovery/devices');
+    if (!resp.ok) return;
+    const d = await resp.json();
+    const s = d.summary || {};
+
+    const canEdit = hasRole('operator');
+    const scanBtn = $('btnDiscoveryScan');
+    if (s.scanRunning) {
+      scanBtn.disabled = true;
+      scanBtn.textContent = '⏳ Varrendo LAN...';
+    } else {
+      scanBtn.disabled = !canEdit;
+      scanBtn.textContent = '🔍 Varrer Sub-rede LAN';
+    }
+
+    const lastStr = s.lastScanMs ? new Date(s.lastScanMs).toLocaleTimeString('pt-BR') : 'Passivo (ARP)';
+    const subs = (s.subnets && s.subnets.length) ? s.subnets.join(', ') : '—';
+    $('discSummaryGrid').innerHTML = `
+      <div class="ana-kpi-card"><div class="ana-kpi-lbl">Dispositivos Conhecidos</div><div class="ana-kpi-val">${Number(s.totalDevices || 0)}</div></div>
+      <div class="ana-kpi-card"><div class="ana-kpi-lbl">Online / Offline</div><div class="ana-kpi-val">${Number(s.onlineCount || 0)} / ${Number(s.offlineCount || 0)}</div></div>
+      <div class="ana-kpi-card"><div class="ana-kpi-lbl">Gateways / Fabricantes</div><div class="ana-kpi-val">${Number(s.gatewaysCount || 0)} / ${Number(s.vendorsCount || 0)}</div></div>
+      <div class="ana-kpi-card"><div class="ana-kpi-lbl">Sub-redes &amp; Varredura</div><div class="ana-kpi-val" style="font-size:11.5px">${escHtml(subs)} (${escHtml(lastStr)})</div></div>
+    `;
+
+    const all = d.devices || [];
+    const filt = state.discovery.filter;
+    const q = state.discovery.search;
+    const filtered = all.filter((dev) => {
+      if (filt === 'online' && !dev.online) return false;
+      if (filt === 'offline' && dev.online) return false;
+      if (filt === 'infra' && !dev.isGateway && dev.deviceType !== 'Ativo de Rede') return false;
+      if (q) {
+        const hay = `${dev.ip} ${dev.mac} ${dev.vendor} ${dev.hostname} ${dev.deviceType} ${dev.customLabel} ${(dev.openPorts || []).join(',')}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+
+    $('discDevicesList').innerHTML = filtered.length === 0
+      ? '<div class="sec-row"><span class="sec-row-meta">Nenhum dispositivo correspondente aos filtros.</span></div>'
+      : filtered.map((dev) => {
+        const title = dev.customLabel || dev.hostname || dev.ip;
+        const ports = (dev.openPorts || []).length ? `Portas: ${dev.openPorts.join(', ')}` : 'Sem portas abertas detectadas';
+        return `
+          <div class="sec-row">
+            <div style="min-width:0;flex:1">
+              <div>
+                <strong>${escHtml(title)}</strong>
+                <span class="sec-row-meta">${escHtml(dev.ip)}</span>
+                <span class="state-pill">${escHtml(dev.deviceType)}</span>
+                ${dev.isLocalHost ? '<span class="state-pill new">ESTE HOST</span>' : ''}
+                ${dev.isGateway ? '<span class="state-pill syn">GATEWAY</span>' : ''}
+                ${dev.randomizedMac ? '<span class="state-pill">MAC PRIVADO</span>' : ''}
+              </div>
+              <div class="sec-row-meta">MAC: ${escHtml(dev.mac || '—')} · Fabricante: ${escHtml(dev.vendor || 'Desconhecido')} · Interface: ${escHtml(dev.interface || '—')}${dev.hostname ? ' · Hostname: ' + escHtml(dev.hostname) : ''}</div>
+              <div class="sec-row-meta">${escHtml(ports)} · RTT ${Number(dev.latencyMs || 0).toFixed(1)}ms · Visto ${Number(dev.seenCount || 1)}x · Último: ${new Date(dev.lastSeen).toLocaleString('pt-BR')}</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:5px;flex-shrink:0">
+              <span class="state-pill ${dev.online ? 'new' : 'closed'}">${dev.online ? 'ONLINE' : 'OFFLINE'}</span>
+              ${canEdit ? `<button type="button" class="mini-pill-btn d-lbl" data-key="${escHtml(dev.key)}" data-cur="${escHtml(dev.customLabel || '')}">✏</button>` : ''}
+              ${canEdit && !dev.isLocalHost ? `<button type="button" class="mini-pill-btn d-del" data-key="${escHtml(dev.key)}">✕</button>` : ''}
+            </div>
+          </div>`;
+      }).join('');
+
+    document.querySelectorAll('.d-lbl').forEach((btn) => {
+      btn.onclick = async () => {
+        const key = btn.getAttribute('data-key');
+        const cur = btn.getAttribute('data-cur') || '';
+        const nextLbl = window.prompt('Nome/rótulo amigável para este dispositivo (vazio remove o rótulo):', cur);
+        if (nextLbl === null) return;
+        await apiFetch('/api/discovery/label', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ deviceKey: key, label: nextLbl.trim() }),
+        });
+        loadDiscoveryDevices();
+      };
+    });
+
+    document.querySelectorAll('.d-del').forEach((btn) => {
+      btn.onclick = async () => {
+        const key = btn.getAttribute('data-key');
+        if (!window.confirm(`Remover dispositivo ${key} do inventário?`)) return;
+        await apiFetch('/api/discovery/devices/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ deviceKey: key, confirm: true }),
+        });
+        loadDiscoveryDevices();
+      };
+    });
   } catch {}
 }
 

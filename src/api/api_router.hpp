@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../core/json_lite.hpp"
+#include "../discovery/discovery_engine.hpp"
 #include "../history_store.hpp"
 #include "../network/interface_monitor.hpp"
 #include "../quality/network_quality_engine.hpp"
@@ -45,6 +46,7 @@ struct ApiDependencies {
   std::function<void()> onRequestRestart;
   NetworkQualityEngine* quality = nullptr;
   InterfaceMonitor* interfaces = nullptr;
+  DiscoveryEngine* discovery = nullptr;
 };
 
 class ApiRouter {

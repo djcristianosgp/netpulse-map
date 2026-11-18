@@ -799,6 +799,91 @@ HttpResponse ApiRouter::handleHttp(const HttpRequest& req) {
     return HttpResponse{200, "application/json; charset=utf-8", deps_.interfaces->getSnapshotJson(), {}};
   }
 
+  // ---- Fase 5: Discovery Engine ----
+  if (path == "/api/discovery/devices" && method == "GET") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Viewer, auth);
+    if (err.statusCode != 200) return err;
+    if (!deps_.discovery) return jsonError(503, "discovery_unavailable");
+    return HttpResponse{200, "application/json; charset=utf-8", deps_.discovery->getDevicesJson(), {}};
+  }
+
+  if (path == "/api/discovery/scan" && method == "POST") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Operator, auth, "discovery.scan");
+    if (err.statusCode != 200) return err;
+    if (!deps_.discovery) return jsonError(503, "discovery_unavailable");
+
+    std::string subnet;
+    if (!req.body.empty()) {
+      JsonValue body;
+      std::string parseErr;
+      if (JsonValue::parse(req.body, body, parseErr) && body.isObject()) {
+        subnet = body.getString("subnet");
+      }
+    }
+    const bool started = deps_.discovery->triggerScanAsync(subnet);
+    deps_.audit.record(auth.actor, roleToString(auth.role), req.remoteIp,
+                       "discovery.scan", subnet.empty() ? "auto" : subnet,
+                       started ? "allowed" : "conflict",
+                       started ? "Varredura LAN iniciada" : "Varredura ja em andamento");
+    return HttpResponse{started ? 202 : 200, "application/json; charset=utf-8",
+                        deps_.discovery->getDevicesJson(), {}};
+  }
+
+  if (path == "/api/discovery/label" && method == "POST") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Operator, auth, "discovery.label");
+    if (err.statusCode != 200) return err;
+    if (!deps_.discovery) return jsonError(503, "discovery_unavailable");
+
+    JsonValue body;
+    std::string parseErr;
+    if (!JsonValue::parse(req.body, body, parseErr) || !body.isObject()) {
+      return jsonError(400, "invalid_json", parseErr);
+    }
+    const std::string key = body.getString("deviceKey");
+    const std::string label = body.getString("label");
+    if (key.empty() || !deps_.discovery->setDeviceLabel(key, label)) {
+      return jsonError(404, "device_not_found");
+    }
+    deps_.audit.record(auth.actor, roleToString(auth.role), req.remoteIp,
+                       "discovery.label", key, "allowed", label);
+    return HttpResponse{200, "application/json; charset=utf-8", deps_.discovery->getDevicesJson(), {}};
+  }
+
+  if ((path == "/api/discovery/devices/delete" && method == "POST") ||
+      (path == "/api/discovery/devices" && method == "DELETE")) {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Operator, auth, "discovery.device_removed");
+    if (err.statusCode != 200) return err;
+    if (!deps_.discovery) return jsonError(503, "discovery_unavailable");
+
+    std::string key;
+    bool confirmed = false;
+    if (method == "DELETE") {
+      key = req.queryParam("key");
+      confirmed = (req.queryParam("confirm") == "true" || req.queryParam("confirm") == "1");
+    } else {
+      JsonValue body;
+      std::string parseErr;
+      if (!JsonValue::parse(req.body, body, parseErr) || !body.isObject()) {
+        return jsonError(400, "invalid_json", parseErr);
+      }
+      key = body.getString("deviceKey");
+      confirmed = body.getBool("confirm", false);
+    }
+    if (!confirmed) {
+      return jsonError(400, "confirmation_required", "Confirmacao explicita obrigatoria");
+    }
+    if (key.empty() || !deps_.discovery->removeDevice(key)) {
+      return jsonError(404, "device_not_found");
+    }
+    deps_.audit.record(auth.actor, roleToString(auth.role), req.remoteIp,
+                       "discovery.device_removed", key, "allowed", "Dispositivo removido do inventario");
+    return HttpResponse{200, "application/json; charset=utf-8", deps_.discovery->getDevicesJson(), {}};
+  }
+
   if (path == "/api/alerts/toggle" && method == "POST") {
     AuthContext auth;
     auto err = requireAuth(req, Role::Operator, auth, "alerts.toggled");

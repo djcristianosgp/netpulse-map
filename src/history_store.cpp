@@ -834,6 +834,7 @@ bool HistoryStore::applyRetentionLocked(sqlite3* db) {
   delBefore("DELETE FROM quality_samples WHERE ts_ms < ?;");
   delBefore("DELETE FROM interface_samples WHERE ts_ms < ?;");
   delBefore("DELETE FROM trace_runs WHERE started_at_ms < ?;");
+  delBefore("DELETE FROM lan_devices WHERE online = 0 AND custom_label = '' AND last_seen_ms < ?;");
   {
     SqliteStmt st(db, "DELETE FROM trace_hops WHERE run_id NOT IN (SELECT id FROM trace_runs);");
     if (st.valid()) st.stepDone();
@@ -1424,12 +1425,15 @@ std::string HistoryStore::getStorageStatsJson() {
   }
   int64_t traceCnt = 0;
   int64_t ifSampleCnt = 0;
+  int64_t lanDevCnt = 0;
   if (db_.isOpen()) {
     db_.withLock([&](sqlite3* db) {
       SqliteStmt st(db, "SELECT COUNT(*) FROM trace_runs;");
       if (st.valid() && st.step() == SQLITE_ROW) traceCnt = st.colInt64(0);
       SqliteStmt st2(db, "SELECT COUNT(*) FROM interface_samples;");
       if (st2.valid() && st2.step() == SQLITE_ROW) ifSampleCnt = st2.colInt64(0);
+      SqliteStmt st3(db, "SELECT COUNT(*) FROM lan_devices;");
+      if (st3.valid() && st3.step() == SQLITE_ROW) lanDevCnt = st3.colInt64(0);
       return true;
     });
   }
@@ -1464,6 +1468,8 @@ std::string HistoryStore::getStorageStatsJson() {
   out += std::to_string(traceCnt);
   out += ",\"interfaceSamples\":";
   out += std::to_string(ifSampleCnt);
+  out += ",\"lanDevices\":";
+  out += std::to_string(lanDevCnt);
   out += "}}";
   return out;
 }
@@ -2171,6 +2177,118 @@ std::string HistoryStore::queryInterfaceHistoryJson(const std::string& ifId, con
   }
   out += "]}";
   return out;
+}
+
+std::vector<LanDeviceRecord> HistoryStore::loadLanDevices() {
+  std::vector<LanDeviceRecord> out;
+  if (!db_.isOpen()) return out;
+  db_.withLock([&](sqlite3* db) {
+    SqliteStmt st(
+        db,
+        "SELECT device_key, ip, mac, vendor, hostname, device_type, interface_name, subnet,"
+        " is_gateway, is_local_host, online, latency_ms, open_ports, custom_label, first_seen_ms, last_seen_ms, seen_count "
+        "FROM lan_devices ORDER BY online DESC, is_local_host DESC, is_gateway DESC, last_seen_ms DESC;");
+    while (st.valid() && st.step() == SQLITE_ROW) {
+      LanDeviceRecord d;
+      d.deviceKey = st.colText(0);
+      d.ip = st.colText(1);
+      d.mac = st.colText(2);
+      d.vendor = st.colText(3);
+      d.hostname = st.colText(4);
+      d.deviceType = st.colText(5);
+      d.interfaceName = st.colText(6);
+      d.subnet = st.colText(7);
+      d.isGateway = (st.colInt64(8) != 0);
+      d.isLocalHost = (st.colInt64(9) != 0);
+      d.online = (st.colInt64(10) != 0);
+      d.latencyMs = st.colDouble(11);
+      d.openPorts = st.colText(12);
+      d.customLabel = st.colText(13);
+      d.firstSeenMs = static_cast<uint64_t>(st.colInt64(14));
+      d.lastSeenMs = static_cast<uint64_t>(st.colInt64(15));
+      d.seenCount = static_cast<uint64_t>(std::max<int64_t>(1, st.colInt64(16)));
+      out.push_back(std::move(d));
+    }
+    return true;
+  });
+  return out;
+}
+
+bool HistoryStore::upsertLanDevices(const std::vector<LanDeviceRecord>& devices, bool markOthersOffline) {
+  if (!db_.isOpen()) return false;
+  return db_.withTransaction([&](sqlite3* db) {
+    if (markOthersOffline) {
+      SqliteStmt off(db, "UPDATE lan_devices SET online = 0;");
+      if (off.valid()) off.stepDone();
+    }
+
+    SqliteStmt st(
+        db,
+        "INSERT INTO lan_devices("
+        "  device_key, ip, mac, vendor, hostname, device_type, interface_name, subnet,"
+        "  is_gateway, is_local_host, online, latency_ms, open_ports, custom_label, first_seen_ms, last_seen_ms, seen_count"
+        ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(device_key) DO UPDATE SET "
+        "  ip=excluded.ip,"
+        "  mac=CASE WHEN excluded.mac<>'' THEN excluded.mac ELSE lan_devices.mac END,"
+        "  vendor=CASE WHEN excluded.vendor<>'' THEN excluded.vendor ELSE lan_devices.vendor END,"
+        "  hostname=CASE WHEN excluded.hostname<>'' THEN excluded.hostname ELSE lan_devices.hostname END,"
+        "  device_type=CASE WHEN excluded.device_type<>'unknown' THEN excluded.device_type ELSE lan_devices.device_type END,"
+        "  interface_name=CASE WHEN excluded.interface_name<>'' THEN excluded.interface_name ELSE lan_devices.interface_name END,"
+        "  subnet=CASE WHEN excluded.subnet<>'' THEN excluded.subnet ELSE lan_devices.subnet END,"
+        "  is_gateway=excluded.is_gateway,"
+        "  is_local_host=excluded.is_local_host,"
+        "  online=excluded.online,"
+        "  latency_ms=CASE WHEN excluded.latency_ms>0 THEN excluded.latency_ms ELSE lan_devices.latency_ms END,"
+        "  open_ports=CASE WHEN excluded.open_ports<>'' THEN excluded.open_ports ELSE lan_devices.open_ports END,"
+        "  last_seen_ms=MAX(lan_devices.last_seen_ms, excluded.last_seen_ms),"
+        "  seen_count=lan_devices.seen_count + 1;");
+    if (!st.valid()) return false;
+    for (const auto& d : devices) {
+      if (d.deviceKey.empty() || d.ip.empty()) continue;
+      st.reset();
+      st.bindText(1, d.deviceKey);
+      st.bindText(2, d.ip);
+      st.bindText(3, d.mac);
+      st.bindText(4, d.vendor);
+      st.bindText(5, d.hostname);
+      st.bindText(6, d.deviceType);
+      st.bindText(7, d.interfaceName);
+      st.bindText(8, d.subnet);
+      st.bindInt64(9, d.isGateway ? 1 : 0);
+      st.bindInt64(10, d.isLocalHost ? 1 : 0);
+      st.bindInt64(11, d.online ? 1 : 0);
+      st.bindDouble(12, d.latencyMs);
+      st.bindText(13, d.openPorts);
+      st.bindText(14, d.customLabel);
+      st.bindInt64(15, static_cast<int64_t>(d.firstSeenMs > 0 ? d.firstSeenMs : nowEpochMs()));
+      st.bindInt64(16, static_cast<int64_t>(d.lastSeenMs > 0 ? d.lastSeenMs : nowEpochMs()));
+      st.bindInt64(17, static_cast<int64_t>(d.seenCount));
+      st.stepDone();
+    }
+    return true;
+  });
+}
+
+bool HistoryStore::setLanDeviceLabel(const std::string& deviceKey, const std::string& label) {
+  if (!db_.isOpen() || deviceKey.empty()) return false;
+  return db_.withTransaction([&](sqlite3* db) {
+    SqliteStmt st(db, "UPDATE lan_devices SET custom_label = ? WHERE device_key = ?;");
+    st.bindText(1, label);
+    st.bindText(2, deviceKey);
+    if (!st.stepDone()) return false;
+    return sqlite3_changes(db) > 0;
+  });
+}
+
+bool HistoryStore::deleteLanDevice(const std::string& deviceKey) {
+  if (!db_.isOpen() || deviceKey.empty()) return false;
+  return db_.withTransaction([&](sqlite3* db) {
+    SqliteStmt st(db, "DELETE FROM lan_devices WHERE device_key = ?;");
+    st.bindText(1, deviceKey);
+    if (!st.stepDone()) return false;
+    return sqlite3_changes(db) > 0;
+  });
 }
 
 } // namespace netpulse

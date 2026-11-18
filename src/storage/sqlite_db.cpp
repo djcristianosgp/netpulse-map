@@ -455,6 +455,50 @@ bool SqliteDb::runMigrations(std::string& outError) {
     if (!execLocked("COMMIT;", outError)) return false;
   }
 
+  if (currentVer < 5) {
+    if (!execLocked("BEGIN IMMEDIATE;", outError)) return false;
+    const char* m5 = R"SQL(
+      CREATE TABLE IF NOT EXISTS lan_devices (
+        device_key TEXT PRIMARY KEY,
+        ip TEXT NOT NULL,
+        mac TEXT NOT NULL DEFAULT '',
+        vendor TEXT NOT NULL DEFAULT '',
+        hostname TEXT NOT NULL DEFAULT '',
+        device_type TEXT NOT NULL DEFAULT 'unknown',
+        interface_name TEXT NOT NULL DEFAULT '',
+        subnet TEXT NOT NULL DEFAULT '',
+        is_gateway INTEGER NOT NULL DEFAULT 0,
+        is_local_host INTEGER NOT NULL DEFAULT 0,
+        online INTEGER NOT NULL DEFAULT 1,
+        latency_ms REAL NOT NULL DEFAULT 0,
+        open_ports TEXT NOT NULL DEFAULT '',
+        custom_label TEXT NOT NULL DEFAULT '',
+        first_seen_ms INTEGER NOT NULL,
+        last_seen_ms INTEGER NOT NULL,
+        seen_count INTEGER NOT NULL DEFAULT 1
+      );
+      CREATE INDEX IF NOT EXISTS idx_lan_devices_ip ON lan_devices(ip);
+      CREATE INDEX IF NOT EXISTS idx_lan_devices_last_seen ON lan_devices(last_seen_ms DESC);
+    )SQL";
+
+    if (!execLocked(m5, outError)) {
+      std::string dummy;
+      execLocked("ROLLBACK;", dummy);
+      return false;
+    }
+
+    SqliteStmt ins5(db_, "INSERT INTO schema_migrations(version, name, applied_at_ms) VALUES(5, '005_discovery_devices', ?);");
+    ins5.bindInt64(1, static_cast<int64_t>(nowEpochMs()));
+    if (!ins5.stepDone()) {
+      outError = sqlite3_errmsg(db_);
+      std::string dummy;
+      execLocked("ROLLBACK;", dummy);
+      return false;
+    }
+
+    if (!execLocked("COMMIT;", outError)) return false;
+  }
+
   return true;
 }
 

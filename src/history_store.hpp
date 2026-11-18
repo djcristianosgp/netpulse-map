@@ -161,6 +161,26 @@ struct InterfaceSampleRecord {
   uint64_t txErrors = 0;
 };
 
+struct LanDeviceRecord {
+  std::string deviceKey;
+  std::string ip;
+  std::string mac;
+  std::string vendor;
+  std::string hostname;
+  std::string deviceType = "unknown";
+  std::string interfaceName;
+  std::string subnet;
+  bool isGateway = false;
+  bool isLocalHost = false;
+  bool online = true;
+  double latencyMs = 0.0;
+  std::string openPorts;
+  std::string customLabel;
+  uint64_t firstSeenMs = 0;
+  uint64_t lastSeenMs = 0;
+  uint64_t seenCount = 1;
+};
+
 bool isSensitivePort(uint16_t port);
 uint64_t rangeToDurationMs(const std::string& range);
 
@@ -205,6 +225,11 @@ public:
 
   void enqueueInterfaceSamples(const std::vector<InterfaceSampleRecord>& samples);
   std::string queryInterfaceHistoryJson(const std::string& ifId, const std::string& range);
+
+  std::vector<LanDeviceRecord> loadLanDevices();
+  bool upsertLanDevices(const std::vector<LanDeviceRecord>& devices, bool markOthersOffline);
+  bool setLanDeviceLabel(const std::string& deviceKey, const std::string& label);
+  bool deleteLanDevice(const std::string& deviceKey);
 
   void flushNow();
   bool pruneNow();

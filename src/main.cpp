@@ -344,6 +344,8 @@ int main(int argc, char** argv) {
   qualityEngine.start();
   netpulse::InterfaceMonitor ifaceMonitor(&history);
   ifaceMonitor.collect(nowMs());
+  netpulse::DiscoveryEngine discoveryEngine(history, ifaceMonitor);
+  discoveryEngine.start();
   auto syncHistoryNotifications = [&](const netpulse::AppSettings& cfg) {
     history.setAlertsEnabled(cfg.alertsEnabled);
     history.setNotificationCategories(netpulse::NotificationCategories{
@@ -407,6 +409,7 @@ int main(int argc, char** argv) {
       },
       &qualityEngine,
       &ifaceMonitor,
+      &discoveryEngine,
   });
 
   const uint64_t startMs = nowMs();
@@ -570,6 +573,7 @@ int main(int argc, char** argv) {
   gRunning.store(false);
   pollThread.request_stop();
   pollThread.join();
+  discoveryEngine.stop();
   tracer.stop();
   qualityEngine.stop();
   serviceMon.stop();

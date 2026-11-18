@@ -26,7 +26,8 @@ public:
 
   WsServer(uint16_t port,
            std::filesystem::path staticDir,
-           std::filesystem::path assetsDir);
+           std::filesystem::path assetsDir,
+           std::string bindHost = "127.0.0.1");
   ~WsServer();
 
   WsServer(const WsServer&) = delete;
@@ -55,6 +56,7 @@ private:
 
   uint16_t requestedPort_ = 8740;
   uint16_t boundPort_ = 0;
+  std::string bindHost_ = "127.0.0.1";
   std::filesystem::path staticDir_;
   std::filesystem::path assetsDir_;
 

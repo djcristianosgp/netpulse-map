@@ -1,3 +1,4 @@
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -11,6 +12,15 @@
 #include <iphlpapi.h>
 #include <tcpestats.h>
 #include <tlhelp32.h>
+#else
+#include <arpa/inet.h>
+#include <dirent.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <cstdio>
+#include <fstream>
+#include <sstream>
+#endif
 
 #include "net_monitor.hpp"
 
@@ -22,6 +32,7 @@ namespace netpulse {
 
 namespace {
 
+#ifdef _WIN32
 std::string wideToUtf8(const wchar_t* wstr, int len = -1) {
   if (!wstr) return {};
   int needed = WideCharToMultiByte(CP_UTF8, 0, wstr, len, nullptr, 0, nullptr, nullptr);
@@ -33,6 +44,7 @@ std::string wideToUtf8(const wchar_t* wstr, int len = -1) {
   }
   return out;
 }
+#endif
 
 std::string basenameFromPath(const std::string& path) {
   size_t pos = path.find_last_of("\\/");
@@ -41,8 +53,8 @@ std::string basenameFromPath(const std::string& path) {
 
 std::string formatIpv4(uint32_t addrNetOrder) {
   char buf[INET_ADDRSTRLEN] = {};
-  IN_ADDR in{};
-  in.S_un.S_addr = addrNetOrder;
+  struct in_addr in{};
+  in.s_addr = addrNetOrder;
   if (inet_ntop(AF_INET, &in, buf, sizeof(buf))) {
     return std::string(buf);
   }
@@ -51,7 +63,7 @@ std::string formatIpv4(uint32_t addrNetOrder) {
 
 std::string formatIpv6(const uint8_t bytes[16]) {
   char buf[INET6_ADDRSTRLEN] = {};
-  IN6_ADDR in6{};
+  struct in6_addr in6{};
   std::memcpy(&in6, bytes, 16);
   if (inet_ntop(AF_INET6, &in6, buf, sizeof(buf))) {
     return std::string(buf);
@@ -85,6 +97,7 @@ std::string makeKey(const char* proto,
 } // namespace
 
 bool isProcessElevated() {
+#ifdef _WIN32
   HANDLE tok = nullptr;
   if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) return false;
   TOKEN_ELEVATION elev{};
@@ -92,6 +105,9 @@ bool isProcessElevated() {
   BOOL ok = GetTokenInformation(tok, TokenElevation, &elev, sizeof(elev), &sz);
   CloseHandle(tok);
   return ok && elev.TokenIsElevated != 0;
+#else
+  return geteuid() == 0;
+#endif
 }
 
 NetMonitor::NetMonitor() : elevated_(isProcessElevated()) {}
@@ -150,12 +166,12 @@ IpScope classifyIpv6(const uint8_t b[16]) {
 }
 
 IpScope classifyIpString(const std::string& ip) {
-  IN_ADDR in4{};
+  struct in_addr in4{};
   if (inet_pton(AF_INET, ip.c_str(), &in4) == 1) {
     const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&in4);
     return classifyIpv4(bytes);
   }
-  IN6_ADDR in6{};
+  struct in6_addr in6{};
   if (inet_pton(AF_INET6, ip.c_str(), &in6) == 1) {
     const uint8_t* bytes = reinterpret_cast<const uint8_t*>(&in6);
     return classifyIpv6(bytes);
@@ -164,7 +180,7 @@ IpScope classifyIpString(const std::string& ip) {
 }
 
 std::string normalizeIpForGeo(const std::string& ip) {
-  IN6_ADDR in6{};
+  struct in6_addr in6{};
   if (inet_pton(AF_INET6, ip.c_str(), &in6) == 1) {
     const uint8_t* b = reinterpret_cast<const uint8_t*>(&in6);
     bool isV4Mapped = true;
@@ -176,7 +192,7 @@ std::string normalizeIpForGeo(const std::string& ip) {
     }
     if (isV4Mapped && b[10] == 0xff && b[11] == 0xff) {
       char buf[INET_ADDRSTRLEN] = {};
-      IN_ADDR in4{};
+      struct in_addr in4{};
       std::memcpy(&in4, &b[12], 4);
       if (inet_ntop(AF_INET, &in4, buf, sizeof(buf))) {
         return std::string(buf);
@@ -188,21 +204,23 @@ std::string normalizeIpForGeo(const std::string& ip) {
 
 const char* tcpStateToString(uint32_t state) {
   switch (state) {
-    case MIB_TCP_STATE_CLOSED: return "CLOSED";
-    case MIB_TCP_STATE_LISTEN: return "LISTEN";
-    case MIB_TCP_STATE_SYN_SENT: return "SYN_SENT";
-    case MIB_TCP_STATE_SYN_RCVD: return "SYN_RCVD";
-    case MIB_TCP_STATE_ESTAB: return "ESTABLISHED";
-    case MIB_TCP_STATE_FIN_WAIT1: return "FIN_WAIT1";
-    case MIB_TCP_STATE_FIN_WAIT2: return "FIN_WAIT2";
-    case MIB_TCP_STATE_CLOSE_WAIT: return "CLOSE_WAIT";
-    case MIB_TCP_STATE_CLOSING: return "CLOSING";
-    case MIB_TCP_STATE_LAST_ACK: return "LAST_ACK";
-    case MIB_TCP_STATE_TIME_WAIT: return "TIME_WAIT";
-    case MIB_TCP_STATE_DELETE_TCB: return "DELETE_TCB";
+    case 1: return "CLOSED";
+    case 2: return "LISTEN";
+    case 3: return "SYN_SENT";
+    case 4: return "SYN_RCVD";
+    case 5: return "ESTABLISHED";
+    case 6: return "FIN_WAIT1";
+    case 7: return "FIN_WAIT2";
+    case 8: return "CLOSE_WAIT";
+    case 9: return "CLOSING";
+    case 10: return "LAST_ACK";
+    case 11: return "TIME_WAIT";
+    case 12: return "DELETE_TCB";
     default: return "UNKNOWN";
   }
 }
+
+#ifdef _WIN32
 
 void NetMonitor::pollTcp4(std::vector<SocketEntry>& out, uint32_t& listeningCount, uint64_t nowMs) {
   ULONG size = 65536;
@@ -524,6 +542,363 @@ void NetMonitor::resolveProcessInfo(uint32_t pid,
   outPath = entry.path;
   outIoBps = entry.ioBps;
 }
+
+#else
+
+namespace {
+
+uint32_t mapLinuxTcpState(uint32_t st) {
+  switch (st) {
+    case 0x01: return 5;  // ESTABLISHED
+    case 0x02: return 3;  // SYN_SENT
+    case 0x03: return 4;  // SYN_RCVD
+    case 0x04: return 6;  // FIN_WAIT1
+    case 0x05: return 7;  // FIN_WAIT2
+    case 0x06: return 11; // TIME_WAIT
+    case 0x07: return 1;  // CLOSE
+    case 0x08: return 8;  // CLOSE_WAIT
+    case 0x09: return 10; // LAST_ACK
+    case 0x0A: return 2;  // LISTEN
+    case 0x0B: return 9;  // CLOSING
+    default: return 0;
+  }
+}
+
+std::unordered_map<uint64_t, uint32_t>& cachedInodePidMap(bool refresh) {
+  static std::unordered_map<uint64_t, uint32_t> map;
+  if (!refresh) return map;
+  map.clear();
+
+  DIR* procDir = opendir("/proc");
+  if (!procDir) return map;
+  struct dirent* ent = nullptr;
+  while ((ent = readdir(procDir)) != nullptr) {
+    if (ent->d_name[0] < '0' || ent->d_name[0] > '9') continue;
+    char* endp = nullptr;
+    unsigned long pidVal = std::strtoul(ent->d_name, &endp, 10);
+    if (!endp || *endp != '\0' || pidVal == 0) continue;
+    uint32_t pid = static_cast<uint32_t>(pidVal);
+
+    std::string fdPath = std::string("/proc/") + ent->d_name + "/fd";
+    DIR* fdDir = opendir(fdPath.c_str());
+    if (!fdDir) continue;
+    struct dirent* fdEnt = nullptr;
+    char linkBuf[128];
+    while ((fdEnt = readdir(fdDir)) != nullptr) {
+      if (fdEnt->d_name[0] == '.') continue;
+      std::string fullFd = fdPath + "/" + fdEnt->d_name;
+      ssize_t len = readlink(fullFd.c_str(), linkBuf, sizeof(linkBuf) - 1);
+      if (len > 9 && std::strncmp(linkBuf, "socket:[", 8) == 0) {
+        linkBuf[len] = '\0';
+        uint64_t inode = std::strtoull(linkBuf + 8, nullptr, 10);
+        if (inode > 0) map[inode] = pid;
+      }
+    }
+    closedir(fdDir);
+  }
+  closedir(procDir);
+  return map;
+}
+
+bool parseProcIpv4(const std::string& hexIpPort, std::string& outIp, uint16_t& outPort) {
+  uint32_t addr = 0;
+  unsigned int port = 0;
+  if (std::sscanf(hexIpPort.c_str(), "%8x:%4x", &addr, &port) != 2) return false;
+  outIp = formatIpv4(addr);
+  outPort = static_cast<uint16_t>(port);
+  return true;
+}
+
+bool parseProcIpv6(const std::string& hexIpPort, std::string& outIp, uint16_t& outPort) {
+  size_t colon = hexIpPort.find(':');
+  if (colon == std::string::npos || colon != 32) return false;
+  uint8_t bytes[16] = {};
+  for (int i = 0; i < 4; ++i) {
+    char word[9] = {};
+    std::memcpy(word, hexIpPort.data() + i * 8, 8);
+    uint32_t w = static_cast<uint32_t>(std::strtoul(word, nullptr, 16));
+    std::memcpy(bytes + i * 4, &w, 4);
+  }
+  outIp = formatIpv6(bytes);
+  outPort = static_cast<uint16_t>(std::strtoul(hexIpPort.c_str() + colon + 1, nullptr, 16));
+  return true;
+}
+
+} // namespace
+
+void NetMonitor::pollTcp4(std::vector<SocketEntry>& out, uint32_t& listeningCount, uint64_t nowMs) {
+  (void)nowMs;
+  auto& inodeMap = cachedInodePidMap(true);
+  std::ifstream in("/proc/net/tcp");
+  if (!in.is_open()) return;
+  std::string line;
+  std::getline(in, line); // header
+  while (std::getline(in, line)) {
+    std::istringstream iss(line);
+    std::string sl, loc, rem, stHex, q, tr, retr, uid, timeout;
+    uint64_t inode = 0;
+    if (!(iss >> sl >> loc >> rem >> stHex >> q >> tr >> retr >> uid >> timeout >> inode)) continue;
+    uint32_t st = mapLinuxTcpState(static_cast<uint32_t>(std::strtoul(stHex.c_str(), nullptr, 16)));
+    if (st == 2) {
+      ++listeningCount;
+      continue;
+    }
+    std::string localIp, remoteIp;
+    uint16_t localPort = 0, remotePort = 0;
+    if (!parseProcIpv4(loc, localIp, localPort) || !parseProcIpv4(rem, remoteIp, remotePort)) continue;
+    if (remoteIp == "0.0.0.0" && remotePort == 0) continue;
+
+    SocketEntry e;
+    e.protocol = "TCP";
+    e.ipVersion = 4;
+    e.localIp = std::move(localIp);
+    e.localPort = localPort;
+    e.remoteIp = std::move(remoteIp);
+    e.remotePort = remotePort;
+    e.state = tcpStateToString(st);
+    auto it = inodeMap.find(inode);
+    e.pid = (it != inodeMap.end()) ? it->second : 0;
+    e.scope = classifyIpString(e.remoteIp);
+    e.key = makeKey("TCP", 4, e.localIp, e.localPort, e.remoteIp, e.remotePort, e.pid);
+    out.push_back(std::move(e));
+  }
+}
+
+void NetMonitor::pollTcp6(std::vector<SocketEntry>& out, uint32_t& listeningCount, uint64_t nowMs) {
+  (void)nowMs;
+  auto& inodeMap = cachedInodePidMap(false);
+  std::ifstream in("/proc/net/tcp6");
+  if (!in.is_open()) return;
+  std::string line;
+  std::getline(in, line);
+  while (std::getline(in, line)) {
+    std::istringstream iss(line);
+    std::string sl, loc, rem, stHex, q, tr, retr, uid, timeout;
+    uint64_t inode = 0;
+    if (!(iss >> sl >> loc >> rem >> stHex >> q >> tr >> retr >> uid >> timeout >> inode)) continue;
+    uint32_t st = mapLinuxTcpState(static_cast<uint32_t>(std::strtoul(stHex.c_str(), nullptr, 16)));
+    if (st == 2) {
+      ++listeningCount;
+      continue;
+    }
+    std::string localIp, remoteIp;
+    uint16_t localPort = 0, remotePort = 0;
+    if (!parseProcIpv6(loc, localIp, localPort) || !parseProcIpv6(rem, remoteIp, remotePort)) continue;
+    if ((remoteIp == "::" || remoteIp == "0.0.0.0") && remotePort == 0) continue;
+
+    SocketEntry e;
+    e.protocol = "TCP";
+    e.ipVersion = 6;
+    e.localIp = std::move(localIp);
+    e.localPort = localPort;
+    e.remoteIp = std::move(remoteIp);
+    e.remotePort = remotePort;
+    e.state = tcpStateToString(st);
+    auto it = inodeMap.find(inode);
+    e.pid = (it != inodeMap.end()) ? it->second : 0;
+    e.scope = classifyIpString(normalizeIpForGeo(e.remoteIp));
+    e.key = makeKey("TCP", 6, e.localIp, e.localPort, e.remoteIp, e.remotePort, e.pid);
+    out.push_back(std::move(e));
+  }
+}
+
+void NetMonitor::pollUdp4(std::vector<SocketEntry>& out, uint32_t& listeningCount) {
+  auto& inodeMap = cachedInodePidMap(false);
+  std::ifstream in("/proc/net/udp");
+  if (!in.is_open()) return;
+  std::string line;
+  std::getline(in, line);
+  while (std::getline(in, line)) {
+    std::istringstream iss(line);
+    std::string sl, loc, rem, stHex, q, tr, retr, uid, timeout;
+    uint64_t inode = 0;
+    if (!(iss >> sl >> loc >> rem >> stHex >> q >> tr >> retr >> uid >> timeout >> inode)) continue;
+    std::string localIp, remoteIp;
+    uint16_t localPort = 0, remotePort = 0;
+    if (!parseProcIpv4(loc, localIp, localPort) || !parseProcIpv4(rem, remoteIp, remotePort)) continue;
+    if (remoteIp == "0.0.0.0" && remotePort == 0) {
+      ++listeningCount;
+      continue;
+    }
+
+    SocketEntry e;
+    e.protocol = "UDP";
+    e.ipVersion = 4;
+    e.localIp = std::move(localIp);
+    e.localPort = localPort;
+    e.remoteIp = std::move(remoteIp);
+    e.remotePort = remotePort;
+    e.state = "UDP";
+    auto it = inodeMap.find(inode);
+    e.pid = (it != inodeMap.end()) ? it->second : 0;
+    e.scope = classifyIpString(e.remoteIp);
+    e.key = makeKey("UDP", 4, e.localIp, e.localPort, e.remoteIp, e.remotePort, e.pid);
+    out.push_back(std::move(e));
+  }
+}
+
+void NetMonitor::pollUdp6(std::vector<SocketEntry>& out, uint32_t& listeningCount) {
+  auto& inodeMap = cachedInodePidMap(false);
+  std::ifstream in("/proc/net/udp6");
+  if (!in.is_open()) return;
+  std::string line;
+  std::getline(in, line);
+  while (std::getline(in, line)) {
+    std::istringstream iss(line);
+    std::string sl, loc, rem, stHex, q, tr, retr, uid, timeout;
+    uint64_t inode = 0;
+    if (!(iss >> sl >> loc >> rem >> stHex >> q >> tr >> retr >> uid >> timeout >> inode)) continue;
+    std::string localIp, remoteIp;
+    uint16_t localPort = 0, remotePort = 0;
+    if (!parseProcIpv6(loc, localIp, localPort) || !parseProcIpv6(rem, remoteIp, remotePort)) continue;
+    if ((remoteIp == "::" || remoteIp == "0.0.0.0") && remotePort == 0) {
+      ++listeningCount;
+      continue;
+    }
+
+    SocketEntry e;
+    e.protocol = "UDP";
+    e.ipVersion = 6;
+    e.localIp = std::move(localIp);
+    e.localPort = localPort;
+    e.remoteIp = std::move(remoteIp);
+    e.remotePort = remotePort;
+    e.state = "UDP";
+    auto it = inodeMap.find(inode);
+    e.pid = (it != inodeMap.end()) ? it->second : 0;
+    e.scope = classifyIpString(normalizeIpForGeo(e.remoteIp));
+    e.key = makeKey("UDP", 6, e.localIp, e.localPort, e.remoteIp, e.remotePort, e.pid);
+    out.push_back(std::move(e));
+  }
+}
+
+NicThroughput NetMonitor::pollNicThroughput(uint64_t nowMs) {
+  NicThroughput t;
+  std::ifstream in("/proc/net/dev");
+  if (!in.is_open()) return t;
+
+  uint64_t totalRx = 0;
+  uint64_t totalTx = 0;
+  std::string line;
+  std::getline(in, line);
+  std::getline(in, line);
+  while (std::getline(in, line)) {
+    size_t colon = line.find(':');
+    if (colon == std::string::npos) continue;
+    std::string iface = line.substr(0, colon);
+    size_t first = iface.find_first_not_of(" \t");
+    if (first != std::string::npos) iface = iface.substr(first);
+    if (iface == "lo") continue;
+
+    std::istringstream iss(line.substr(colon + 1));
+    uint64_t rxBytes = 0, dummy = 0, txBytes = 0;
+    if (!(iss >> rxBytes)) continue;
+    for (int i = 0; i < 7; ++i) iss >> dummy;
+    if (!(iss >> txBytes)) continue;
+    totalRx += rxBytes;
+    totalTx += txBytes;
+    ++t.activeInterfaces;
+  }
+
+  t.totalRxBytes = totalRx;
+  t.totalTxBytes = totalTx;
+
+  if (prevNicSampleMs_ > 0 && nowMs > prevNicSampleMs_) {
+    const double dt = static_cast<double>(nowMs - prevNicSampleMs_) / 1000.0;
+    if (dt > 0.0) {
+      if (totalRx >= prevNicRxBytes_) {
+        t.rxBytesPerSec = static_cast<double>(totalRx - prevNicRxBytes_) / dt;
+      }
+      if (totalTx >= prevNicTxBytes_) {
+        t.txBytesPerSec = static_cast<double>(totalTx - prevNicTxBytes_) / dt;
+      }
+    }
+  }
+  prevNicSampleMs_ = nowMs;
+  prevNicRxBytes_ = totalRx;
+  prevNicTxBytes_ = totalTx;
+  return t;
+}
+
+std::unordered_map<uint32_t, std::string> NetMonitor::buildProcessSnapshotMap() {
+  std::unordered_map<uint32_t, std::string> map;
+  DIR* procDir = opendir("/proc");
+  if (!procDir) return map;
+  struct dirent* ent = nullptr;
+  while ((ent = readdir(procDir)) != nullptr) {
+    if (ent->d_name[0] < '0' || ent->d_name[0] > '9') continue;
+    char* endp = nullptr;
+    unsigned long pidVal = std::strtoul(ent->d_name, &endp, 10);
+    if (!endp || *endp != '\0' || pidVal == 0) continue;
+    std::ifstream comm(std::string("/proc/") + ent->d_name + "/comm");
+    std::string name;
+    if (std::getline(comm, name) && !name.empty()) {
+      map[static_cast<uint32_t>(pidVal)] = std::move(name);
+    }
+  }
+  closedir(procDir);
+  return map;
+}
+
+void NetMonitor::resolveProcessInfo(uint32_t pid,
+                                    uint64_t nowMs,
+                                    const std::unordered_map<uint32_t, std::string>& snapshotMap,
+                                    std::string& outName,
+                                    std::string& outPath,
+                                    double& outIoBps) {
+  if (pid == 0) {
+    outName = "Kernel / Socket";
+    outPath.clear();
+    outIoBps = 0.0;
+    return;
+  }
+
+  auto& entry = procCache_[pid];
+  const bool needRefresh = entry.name.empty() || (nowMs - entry.lastCheckedMs) >= 5000;
+  if (needRefresh) {
+    entry.lastCheckedMs = nowMs;
+    char exeBuf[1024] = {};
+    std::string exeLink = "/proc/" + std::to_string(pid) + "/exe";
+    ssize_t len = readlink(exeLink.c_str(), exeBuf, sizeof(exeBuf) - 1);
+    if (len > 0) {
+      exeBuf[len] = '\0';
+      entry.path = exeBuf;
+      entry.name = basenameFromPath(entry.path);
+    }
+    std::ifstream comm("/proc/" + std::to_string(pid) + "/comm");
+    std::string commName;
+    if (std::getline(comm, commName) && !commName.empty()) {
+      entry.name = std::move(commName);
+    }
+    std::ifstream ioFile("/proc/" + std::to_string(pid) + "/io");
+    if (ioFile.is_open()) {
+      std::string k;
+      uint64_t v = 0, rBytes = 0, wBytes = 0;
+      while (ioFile >> k >> v) {
+        if (k == "read_bytes:") rBytes = v;
+        else if (k == "write_bytes:") wBytes = v;
+      }
+      uint64_t totalIo = rBytes + wBytes;
+      if (entry.prevIoTimeMs > 0 && nowMs > entry.prevIoTimeMs && totalIo >= entry.prevIoBytes) {
+        double dt = static_cast<double>(nowMs - entry.prevIoTimeMs) / 1000.0;
+        if (dt > 0.0) entry.ioBps = static_cast<double>(totalIo - entry.prevIoBytes) / dt;
+      }
+      entry.prevIoBytes = totalIo;
+      entry.prevIoTimeMs = nowMs;
+    }
+  }
+
+  if (entry.name.empty()) {
+    auto snapIt = snapshotMap.find(pid);
+    entry.name = (snapIt != snapshotMap.end()) ? snapIt->second : ("PID " + std::to_string(pid));
+  }
+
+  outName = entry.name;
+  outPath = entry.path;
+  outIoBps = entry.ioBps;
+}
+
+#endif
 
 TelemetrySnapshot NetMonitor::poll(uint64_t nowMs) {
   const auto t0 = std::chrono::steady_clock::now();

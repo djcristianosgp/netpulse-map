@@ -1,3 +1,4 @@
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -10,6 +11,23 @@
 #include <windows.h>
 #include <bcrypt.h>
 #include <wincrypt.h>
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <openssl/evp.h>
+#include <openssl/sha.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
+using SOCKET = int;
+constexpr SOCKET INVALID_SOCKET = -1;
+constexpr int SOCKET_ERROR = -1;
+inline int closesocket(int s) { return ::close(s); }
+#ifndef SD_BOTH
+#define SD_BOTH SHUT_RDWR
+#endif
+#endif
 
 #include "ws_server.hpp"
 
@@ -44,11 +62,27 @@ bool sendAll(SOCKET s, const char* data, size_t len) {
   size_t sent = 0;
   while (sent < len) {
     int chunk = static_cast<int>(std::min<size_t>(len - sent, 65536));
+#ifdef _WIN32
     int n = send(s, data + sent, chunk, 0);
+#else
+    ssize_t n = send(s, data + sent, static_cast<size_t>(chunk), MSG_NOSIGNAL);
+#endif
     if (n <= 0) return false;
     sent += static_cast<size_t>(n);
   }
   return true;
+}
+
+void setRecvTimeoutMs(SOCKET s, uint32_t ms) {
+#ifdef _WIN32
+  DWORD timeoutMs = ms;
+  setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
+#else
+  timeval tv{};
+  tv.tv_sec = static_cast<time_t>(ms / 1000);
+  tv.tv_usec = static_cast<suseconds_t>((ms % 1000) * 1000);
+  setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
 }
 
 bool recvExact(SOCKET s, uint8_t* buf, size_t len) {
@@ -108,10 +142,11 @@ struct WsServer::ClientConn {
 
 std::string computeWebSocketAcceptKey(const std::string& clientKey) {
   const std::string combined = trimAscii(clientKey) + kWsMagicGuid;
+  uint8_t sha1Digest[20] = {};
 
+#ifdef _WIN32
   BCRYPT_ALG_HANDLE hAlg = nullptr;
   BCRYPT_HASH_HANDLE hHash = nullptr;
-  uint8_t sha1Digest[20] = {};
 
   if (BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA1_ALGORITHM, nullptr, 0) != 0) {
     return {};
@@ -143,6 +178,13 @@ std::string computeWebSocketAcceptKey(const std::string& clientKey) {
   }
   if (!out.empty() && out.back() == '\0') out.pop_back();
   return out;
+#else
+  SHA1(reinterpret_cast<const unsigned char*>(combined.data()), combined.size(), sha1Digest);
+  unsigned char b64[64] = {};
+  int len = EVP_EncodeBlock(b64, sha1Digest, sizeof(sha1Digest));
+  if (len <= 0) return {};
+  return std::string(reinterpret_cast<char*>(b64), static_cast<size_t>(len));
+#endif
 }
 
 std::vector<uint8_t> encodeWebSocketFrame(uint8_t opcode, const std::string& payload) {
@@ -169,8 +211,10 @@ std::vector<uint8_t> encodeWebSocketFrame(uint8_t opcode, const std::string& pay
 
 WsServer::WsServer(uint16_t port,
                    std::filesystem::path staticDir,
-                   std::filesystem::path assetsDir)
+                   std::filesystem::path assetsDir,
+                   std::string bindHost)
     : requestedPort_(port),
+      bindHost_(std::move(bindHost)),
       staticDir_(std::move(staticDir)),
       assetsDir_(std::move(assetsDir)) {}
 
@@ -187,13 +231,17 @@ bool WsServer::start() {
     return false;
   }
 
-  BOOL opt = TRUE;
+  int opt = 1;
   setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&opt), sizeof(opt));
 
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(requestedPort_);
-  inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+  if (bindHost_.empty() || bindHost_ == "0.0.0.0") {
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  } else if (inet_pton(AF_INET, bindHost_.c_str(), &addr.sin_addr) != 1) {
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+  }
 
   if (bind(ls, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
     closesocket(ls);
@@ -202,7 +250,11 @@ bool WsServer::start() {
   }
 
   sockaddr_in boundAddr{};
+#ifdef _WIN32
   int boundLen = sizeof(boundAddr);
+#else
+  socklen_t boundLen = sizeof(boundAddr);
+#endif
   if (getsockname(ls, reinterpret_cast<sockaddr*>(&boundAddr), &boundLen) == 0) {
     boundPort_ = ntohs(boundAddr.sin_port);
   } else {
@@ -302,7 +354,7 @@ void WsServer::acceptLoop(std::stop_token stopToken) {
     SOCKET cs = accept(ls, nullptr, nullptr);
     if (cs == INVALID_SOCKET) break;
 
-    BOOL nodelay = TRUE;
+    int nodelay = 1;
     setsockopt(cs, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&nodelay), sizeof(nodelay));
 
     activeHandlers_.fetch_add(1);
@@ -366,8 +418,7 @@ bool WsServer::sendFileResponse(uintptr_t rawSock,
 void WsServer::handleHttpOrWs(uintptr_t rawSock) {
   SOCKET s = static_cast<SOCKET>(rawSock);
 
-  DWORD timeoutMs = 5000;
-  setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
+  setRecvTimeoutMs(s, 5000);
 
   std::string req;
   req.reserve(2048);
@@ -430,8 +481,7 @@ void WsServer::handleHttpOrWs(uintptr_t rawSock) {
     }
 
     // Clear receive timeout for long-lived WebSocket connection.
-    DWORD noTimeout = 0;
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&noTimeout), sizeof(noTimeout));
+    setRecvTimeoutMs(s, 0);
 
     auto client = std::make_shared<ClientConn>();
     client->sock = s;

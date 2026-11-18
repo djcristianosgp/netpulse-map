@@ -1,3 +1,4 @@
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -8,6 +9,11 @@
 #include <winsock2.h>
 #include <windows.h>
 #include <shellapi.h>
+#else
+#include <csignal>
+#include <limits.h>
+#include <unistd.h>
+#endif
 
 #include "actions.hpp"
 #include "geo_dns.hpp"
@@ -36,6 +42,7 @@ namespace {
 
 std::atomic<bool> gRunning{true};
 
+#ifdef _WIN32
 BOOL WINAPI consoleCtrlHandler(DWORD ctrlType) {
   switch (ctrlType) {
     case CTRL_C_EVENT:
@@ -48,6 +55,11 @@ BOOL WINAPI consoleCtrlHandler(DWORD ctrlType) {
       return FALSE;
   }
 }
+#else
+void posixSignalHandler(int) {
+  gRunning.store(false);
+}
+#endif
 
 uint64_t nowMs() {
   return static_cast<uint64_t>(
@@ -57,9 +69,17 @@ uint64_t nowMs() {
 }
 
 std::filesystem::path findProjectRoot() {
+#ifdef _WIN32
   wchar_t exeBuf[MAX_PATH * 2] = {};
   GetModuleFileNameW(nullptr, exeBuf, static_cast<DWORD>(std::size(exeBuf)));
   std::filesystem::path exeDir = std::filesystem::path(exeBuf).parent_path();
+#else
+  char exeBuf[PATH_MAX] = {};
+  ssize_t len = readlink("/proc/self/exe", exeBuf, sizeof(exeBuf) - 1);
+  std::filesystem::path exeDir = (len > 0)
+      ? std::filesystem::path(std::string(exeBuf, static_cast<size_t>(len))).parent_path()
+      : std::filesystem::current_path();
+#endif
 
   std::error_code ec;
   if (std::filesystem::exists(exeDir / "static" / "index.html", ec)) {
@@ -74,6 +94,7 @@ std::filesystem::path findProjectRoot() {
 std::filesystem::path resolveDataDir(const std::filesystem::path& rootDir) {
   std::error_code ec;
   const auto localData = rootDir / "data";
+#ifdef _WIN32
   if (std::filesystem::exists(rootDir / "src", ec)) {
     return localData;
   }
@@ -94,10 +115,14 @@ std::filesystem::path resolveDataDir(const std::filesystem::path& rootDir) {
   if (len > 0 && len < std::size(appDataBuf)) {
     return std::filesystem::path(appDataBuf) / "NetPulse2D" / "data";
   }
+#else
+  std::filesystem::create_directories(localData, ec);
+#endif
   return localData;
 }
 
 void launchAppWindow(const std::string& url, bool useAppMode) {
+#ifdef _WIN32
   if (useAppMode && netpulse::focusExistingMapWindow()) {
     return;
   }
@@ -122,6 +147,10 @@ void launchAppWindow(const std::string& url, bool useAppMode) {
 
   std::wstring wUrl(url.begin(), url.end());
   ShellExecuteW(nullptr, L"open", wUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#else
+  (void)url;
+  (void)useAppMode;
+#endif
 }
 
 std::string extractSimpleJsonField(const std::string& body, const std::string& key) {
@@ -151,15 +180,29 @@ std::string extractSimpleJsonField(const std::string& body, const std::string& k
 
 int main(int argc, char** argv) {
   uint16_t port = 8740;
+  std::string bindHost = "127.0.0.1";
   std::atomic<uint32_t> intervalMs{1000};
+#ifdef _WIN32
   bool openBrowser = true;
+#else
+  bool openBrowser = false;
+#endif
   bool useAppMode = true;
   bool waitSlot = false;
+
+  if (const char* envHost = std::getenv("NETPULSE_HOST")) {
+    if (*envHost) bindHost = envHost;
+  }
+  if (const char* envPort = std::getenv("NETPULSE_PORT")) {
+    if (*envPort) port = static_cast<uint16_t>(std::clamp(std::atoi(envPort), 1024, 65535));
+  }
 
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
     if (arg == "--port" && i + 1 < argc) {
       port = static_cast<uint16_t>(std::clamp(std::atoi(argv[++i]), 1024, 65535));
+    } else if (arg == "--host" && i + 1 < argc) {
+      bindHost = argv[++i];
     } else if (arg == "--interval" && i + 1 < argc) {
       intervalMs.store(static_cast<uint32_t>(std::clamp(std::atoi(argv[++i]), 100, 5000)));
     } else if (arg == "--no-browser") {
@@ -171,10 +214,12 @@ int main(int argc, char** argv) {
     }
   }
 
+#ifdef _WIN32
   WSADATA wsa{};
   if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
     return 1;
   }
+#endif
 
   const bool trayMode = (openBrowser || waitSlot) && (port == 8740);
   void* instanceMutex = nullptr;
@@ -189,12 +234,20 @@ int main(int argc, char** argv) {
       if (i + 1 < attempts) std::this_thread::sleep_for(std::chrono::milliseconds(150));
     }
     if (!acquired) {
+#ifdef _WIN32
       WSACleanup();
+#endif
       return 0;
     }
   }
 
+#ifdef _WIN32
   SetConsoleCtrlHandler(consoleCtrlHandler, TRUE);
+#else
+  std::signal(SIGINT, posixSignalHandler);
+  std::signal(SIGTERM, posixSignalHandler);
+  std::signal(SIGPIPE, SIG_IGN);
+#endif
 
   const std::filesystem::path rootDir = findProjectRoot();
   const std::filesystem::path staticDir = rootDir / "static";
@@ -236,15 +289,20 @@ int main(int argc, char** argv) {
   updater.startAutoCheck();
 
   netpulse::NetMonitor monitor;
-  netpulse::WsServer server(port, staticDir, assetsDir);
+  netpulse::WsServer server(port, staticDir, assetsDir, bindHost);
 
   const uint64_t startMs = nowMs();
   std::atomic<uint64_t> lastPollUs{0};
 
   server.setHealthCallback([&]() {
     uint64_t uptime = nowMs() - startMs;
+#ifdef _WIN32
+    const char* engineName = "C++20 Native Win32";
+#else
+    const char* engineName = "C++20 Native Linux";
+#endif
     return std::string("{\"status\":\"ok\",\"version\":\"") + netpulse::kAppVersion +
-           "\",\"engine\":\"C++20 Native Win32\",\"elevated\":" +
+           "\",\"engine\":\"" + engineName + "\",\"elevated\":" +
            (netpulse::isProcessElevated() ? "true" : "false") +
            ",\"mmdb\":" + (geoDns.hasOfflineMmdb() ? "true" : "false") +
            ",\"uptimeMs\":" + std::to_string(uptime) +
@@ -427,7 +485,9 @@ int main(int argc, char** argv) {
     updater.stop();
     geoDns.stop();
     netpulse::releaseSingleInstance(instanceMutex);
+#ifdef _WIN32
     WSACleanup();
+#endif
     return 1;
   }
 
@@ -500,6 +560,8 @@ int main(int argc, char** argv) {
   server.stop();
   geoDns.stop();
   netpulse::releaseSingleInstance(instanceMutex);
+#ifdef _WIN32
   WSACleanup();
+#endif
   return 0;
 }

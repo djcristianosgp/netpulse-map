@@ -1,3 +1,4 @@
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -8,6 +9,17 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#else
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <cerrno>
+#include <cstring>
+#endif
 
 #include "models.hpp"
 #include "service_monitor.hpp"
@@ -71,11 +83,19 @@ ProbeOutcome tcpProbeHost(const std::string& host, uint16_t port, int timeoutMs 
     }
     out.resolvedIp = ipBuf;
 
+#ifdef _WIN32
     SOCKET s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
     if (s == INVALID_SOCKET) continue;
 
     u_long nonBlocking = 1;
     ioctlsocket(s, FIONBIO, &nonBlocking);
+#else
+    int s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+    if (s < 0) continue;
+
+    int flags = fcntl(s, F_GETFL, 0);
+    if (flags >= 0) fcntl(s, F_SETFL, flags | O_NONBLOCK);
+#endif
 
     const auto t0 = std::chrono::steady_clock::now();
     int rc = connect(s, ai->ai_addr, static_cast<int>(ai->ai_addrlen));
@@ -85,8 +105,14 @@ ProbeOutcome tcpProbeHost(const std::string& host, uint16_t port, int timeoutMs 
     if (rc == 0) {
       connected = true;
     } else {
-      int wsaErr = WSAGetLastError();
-      if (wsaErr == WSAEWOULDBLOCK || wsaErr == WSAEINPROGRESS) {
+#ifdef _WIN32
+      int sockErr = WSAGetLastError();
+      bool inProgress = (sockErr == WSAEWOULDBLOCK || sockErr == WSAEINPROGRESS);
+#else
+      int sockErr = errno;
+      bool inProgress = (sockErr == EINPROGRESS || sockErr == EWOULDBLOCK);
+#endif
+      if (inProgress) {
         fd_set writeSet;
         fd_set errSet;
         FD_ZERO(&writeSet);
@@ -98,10 +124,15 @@ ProbeOutcome tcpProbeHost(const std::string& host, uint16_t port, int timeoutMs 
         tv.tv_sec = timeoutMs / 1000;
         tv.tv_usec = (timeoutMs % 1000) * 1000;
 
+#ifdef _WIN32
         int sel = select(0, nullptr, &writeSet, &errSet, &tv);
+        int optLen = sizeof(int);
+#else
+        int sel = select(s + 1, nullptr, &writeSet, &errSet, &tv);
+        socklen_t optLen = sizeof(int);
+#endif
         if (sel > 0 && FD_ISSET(s, &writeSet) && !FD_ISSET(s, &errSet)) {
           int soErr = 0;
-          int optLen = sizeof(soErr);
           if (getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&soErr), &optLen) == 0 && soErr == 0) {
             connected = true;
           } else {
@@ -113,12 +144,16 @@ ProbeOutcome tcpProbeHost(const std::string& host, uint16_t port, int timeoutMs 
           errMsg = "Connect failed";
         }
       } else {
-        errMsg = "WSA " + std::to_string(wsaErr);
+        errMsg = "Socket err " + std::to_string(sockErr);
       }
     }
 
     const auto t1 = std::chrono::steady_clock::now();
+#ifdef _WIN32
     closesocket(s);
+#else
+    close(s);
+#endif
 
     if (connected) {
       out.ok = true;

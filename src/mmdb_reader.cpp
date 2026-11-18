@@ -1,12 +1,16 @@
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#endif
 
 #include "mmdb_reader.hpp"
 
@@ -307,8 +311,8 @@ std::optional<GeoInfo> MmdbReader::lookup(const std::string& ip) const {
   int bitCount = 0;
   uint32_t node = 0;
 
-  IN_ADDR in4{};
-  IN6_ADDR in6{};
+  struct in_addr in4{};
+  struct in6_addr in6{};
   if (inet_pton(AF_INET, ip.c_str(), &in4) == 1) {
     std::memcpy(addrBytes, &in4, 4);
     bitCount = 32;

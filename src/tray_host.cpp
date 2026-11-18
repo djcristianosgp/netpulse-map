@@ -1,3 +1,5 @@
+#ifdef _WIN32
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -332,3 +334,37 @@ void runTrayMessageLoop(const std::string& /*url*/,
 }
 
 } // namespace netpulse
+
+#else
+
+#include "tray_host.hpp"
+
+#include <chrono>
+#include <thread>
+
+namespace netpulse {
+
+void runTrayMessageLoop(const std::string& url,
+                        std::atomic<bool>& runningFlag,
+                        TrayCallbacks callbacks) {
+  (void)url;
+  (void)callbacks;
+  while (runningFlag.load()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  }
+}
+
+void requestTrayQuit() {}
+void showTrayBalloon(const std::string&, const std::string&, bool) {}
+void setMinimizeToTrayEnabled(bool) {}
+bool minimizeMapWindowToTray() { return false; }
+bool focusExistingMapWindow() { return false; }
+bool acquireSingleInstanceOrFocusExisting(void** outMutexHandle) {
+  if (outMutexHandle) *outMutexHandle = nullptr;
+  return true;
+}
+void releaseSingleInstance(void*) {}
+
+} // namespace netpulse
+
+#endif

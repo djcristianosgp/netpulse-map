@@ -1,3 +1,4 @@
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -6,6 +7,7 @@
 #endif
 
 #include <windows.h>
+#endif
 
 #include "models.hpp"
 #include "settings_store.hpp"
@@ -33,6 +35,7 @@ bool SettingsStore::parseLine(const std::string& line, std::string& key, std::st
 }
 
 bool SettingsStore::queryWindowsAutoStartRegistry() {
+#ifdef _WIN32
   HKEY hKey = nullptr;
   if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunSubkey, 0, KEY_READ, &hKey) != ERROR_SUCCESS) {
     return false;
@@ -42,11 +45,15 @@ bool SettingsStore::queryWindowsAutoStartRegistry() {
   LONG rc = RegQueryValueExW(hKey, kRunValueName, nullptr, &type, nullptr, &size);
   RegCloseKey(hKey);
   return (rc == ERROR_SUCCESS && size > 2);
+#else
+  return false;
+#endif
 }
 
 bool SettingsStore::syncWindowsAutoStartRegistry(bool enabled,
                                                  bool startMinimized,
                                                  std::string& outError) {
+#ifdef _WIN32
   HKEY hKey = nullptr;
   LONG rc = RegCreateKeyExW(HKEY_CURRENT_USER, kRunSubkey, 0, nullptr, 0,
                             KEY_WRITE, nullptr, &hKey, nullptr);
@@ -83,6 +90,12 @@ bool SettingsStore::syncWindowsAutoStartRegistry(bool enabled,
     return false;
   }
   return true;
+#else
+  (void)enabled;
+  (void)startMinimized;
+  (void)outError;
+  return true;
+#endif
 }
 
 SettingsStore::SettingsStore(std::filesystem::path settingsPath)

@@ -1,3 +1,4 @@
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -10,6 +11,11 @@
 #include <windows.h>
 #include <iphlpapi.h>
 #include <icmpapi.h>
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sstream>
+#endif
 
 #include "models.hpp"
 #include "net_monitor.hpp"
@@ -36,8 +42,8 @@ void TracerouteService::stop() {
 }
 
 bool TracerouteService::startTrace(const std::string& targetIp) {
-  IN_ADDR in4{};
-  IN6_ADDR in6{};
+  struct in_addr in4{};
+  struct in6_addr in6{};
   if (inet_pton(AF_INET, targetIp.c_str(), &in4) != 1 &&
       inet_pton(AF_INET6, targetIp.c_str(), &in6) != 1) {
     return false;
@@ -56,6 +62,7 @@ bool TracerouteService::startTrace(const std::string& targetIp) {
 }
 
 void TracerouteService::runTrace(std::stop_token st, std::string targetIp) {
+#ifdef _WIN32
   IN_ADDR in4{};
   IN6_ADDR in6{};
   const bool isV4 = (inet_pton(AF_INET, targetIp.c_str(), &in4) == 1);
@@ -169,6 +176,49 @@ void TracerouteService::runTrace(std::stop_token st, std::string targetIp) {
   std::lock_guard lock(mutex_);
   session_.running = false;
   session_.completed = true;
+#else
+  std::string cmd = "traceroute -n -q 1 -w 1 -m 28 " + targetIp + " 2>&1";
+  FILE* pipe = popen(cmd.c_str(), "r");
+  if (!pipe) {
+    std::lock_guard lock(mutex_);
+    session_.running = false;
+    session_.completed = true;
+    session_.error = "Falha ao executar traceroute";
+    return;
+  }
+  char lineBuf[512];
+  int consecutiveTimeouts = 0;
+  while (!st.stop_requested() && fgets(lineBuf, sizeof(lineBuf), pipe) != nullptr) {
+    std::istringstream iss(lineBuf);
+    int ttl = 0;
+    if (!(iss >> ttl) || ttl <= 0) continue;
+    std::string tok1;
+    if (!(iss >> tok1)) continue;
+    TraceHop hop;
+    hop.ttl = ttl;
+    if (tok1 == "*") {
+      hop.timedOut = true;
+      ++consecutiveTimeouts;
+    } else {
+      hop.ip = tok1;
+      consecutiveTimeouts = 0;
+      double rtt = 0.0;
+      if (iss >> rtt) hop.rttMs = rtt;
+      geoDns_.enqueueLookups({hop.ip});
+    }
+    const bool reachedTarget = (!hop.timedOut && hop.ip == targetIp);
+    {
+      std::lock_guard lock(mutex_);
+      session_.hops.push_back(hop);
+    }
+    if (reachedTarget || (ttl >= 12 && consecutiveTimeouts >= 4)) break;
+  }
+  pclose(pipe);
+
+  std::lock_guard lock(mutex_);
+  session_.running = false;
+  session_.completed = true;
+#endif
 }
 
 std::string TracerouteService::getStatusJson() const {

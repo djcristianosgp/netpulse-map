@@ -1,3 +1,4 @@
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -9,6 +10,14 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <shellapi.h>
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <signal.h>
+#include <unistd.h>
+#include <cerrno>
+#include <cstring>
+#endif
 
 #include "actions.hpp"
 
@@ -20,6 +29,7 @@ namespace netpulse {
 
 namespace {
 
+#ifdef _WIN32
 std::wstring utf8ToWide(const std::string& s) {
   if (s.empty()) return {};
   int needed = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
@@ -28,6 +38,7 @@ std::wstring utf8ToWide(const std::string& s) {
   MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), out.data(), needed);
   return out;
 }
+#endif
 
 std::string toLowerAscii(std::string s) {
   for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -38,13 +49,14 @@ std::string toLowerAscii(std::string s) {
 
 bool isValidIpAddress(const std::string& ip) {
   if (ip.empty() || ip.size() > 64) return false;
-  IN_ADDR in4{};
+  struct in_addr in4{};
   if (inet_pton(AF_INET, ip.c_str(), &in4) == 1) return true;
-  IN6_ADDR in6{};
+  struct in6_addr in6{};
   return inet_pton(AF_INET6, ip.c_str(), &in6) == 1;
 }
 
 bool isProtectedSystemProcess(uint32_t pid, const std::string& procName) {
+#ifdef _WIN32
   if (pid <= 4 || pid == GetCurrentProcessId()) return true;
   const std::string lower = toLowerAscii(procName);
   return lower == "system" || lower == "system idle" ||
@@ -52,6 +64,12 @@ bool isProtectedSystemProcess(uint32_t pid, const std::string& procName) {
          lower == "wininit.exe" || lower == "winlogon.exe" ||
          lower == "services.exe" || lower == "lsass.exe" ||
          lower == "dwm.exe";
+#else
+  if (pid <= 1 || pid == static_cast<uint32_t>(getpid())) return true;
+  const std::string lower = toLowerAscii(procName);
+  return lower == "systemd" || lower == "init" || lower == "sshd" ||
+         lower == "dockerd" || lower == "containerd";
+#endif
 }
 
 bool terminateTargetProcess(uint32_t pid, const std::string& procName, std::string& outError) {
@@ -60,6 +78,7 @@ bool terminateTargetProcess(uint32_t pid, const std::string& procName, std::stri
     return false;
   }
 
+#ifdef _WIN32
   HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
   if (!hProc) {
     DWORD err = GetLastError();
@@ -77,9 +96,17 @@ bool terminateTargetProcess(uint32_t pid, const std::string& procName, std::stri
     return false;
   }
   return true;
+#else
+  if (kill(static_cast<pid_t>(pid), SIGTERM) != 0) {
+    outError = "Falha ao encerrar processo: " + std::string(std::strerror(errno));
+    return false;
+  }
+  return true;
+#endif
 }
 
 bool blockIpInWindowsFirewall(const std::string& ip, bool isElevated, std::string& outError) {
+#ifdef _WIN32
   if (!isValidIpAddress(ip)) {
     outError = "Endereco IP invalido";
     return false;
@@ -120,15 +147,25 @@ bool blockIpInWindowsFirewall(const std::string& ip, bool isElevated, std::strin
     }
   }
   return true;
+#else
+  (void)ip;
+  (void)isElevated;
+  outError = "Bloqueio automatico via firewall disponivel apenas no Windows";
+  return false;
+#endif
 }
 
 bool relaunchAsAdministrator() {
+#ifdef _WIN32
   wchar_t exeBuf[MAX_PATH * 2] = {};
   if (GetModuleFileNameW(nullptr, exeBuf, static_cast<DWORD>(std::size(exeBuf))) == 0) {
     return false;
   }
   HINSTANCE res = ShellExecuteW(nullptr, L"runas", exeBuf, L"--wait-slot --no-browser", nullptr, SW_SHOWNORMAL);
   return reinterpret_cast<INT_PTR>(res) > 32;
+#else
+  return false;
+#endif
 }
 
 } // namespace netpulse

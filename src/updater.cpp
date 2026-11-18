@@ -1,3 +1,4 @@
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -8,6 +9,9 @@
 #include <windows.h>
 #include <bcrypt.h>
 #include <winhttp.h>
+#else
+#include <openssl/evp.h>
+#endif
 
 #include "models.hpp"
 #include "updater.hpp"
@@ -25,6 +29,7 @@ namespace netpulse {
 
 namespace {
 
+#ifdef _WIN32
 struct WinHttpCloser {
   HINTERNET h = nullptr;
   ~WinHttpCloser() {
@@ -40,6 +45,7 @@ std::wstring utf8ToWide(const std::string& s) {
   MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), out.data(), needed);
   return out;
 }
+#endif
 
 std::string toLower(std::string s) {
   for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -177,6 +183,7 @@ std::vector<std::string> splitAssetObjects(const std::string& json) {
   return items;
 }
 
+#ifdef _WIN32
 struct HttpsResponse {
   DWORD status = 0;
   std::string body;
@@ -358,6 +365,7 @@ bool spawnDetachedInstallerTrampoline(const std::filesystem::path& installerPath
   }
   return false;
 }
+#endif
 
 } // namespace
 
@@ -464,6 +472,7 @@ std::string computeFileSha256Hex(const std::filesystem::path& filePath) {
   std::ifstream in(filePath, std::ios::binary);
   if (!in.is_open()) return {};
 
+#ifdef _WIN32
   BCRYPT_ALG_HANDLE hAlg = nullptr;
   BCRYPT_HASH_HANDLE hHash = nullptr;
   if (BCryptOpenAlgorithmProvider(&hAlg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) != 0) return {};
@@ -495,6 +504,37 @@ std::string computeFileSha256Hex(const std::filesystem::path& filePath) {
   }
   BCryptCloseAlgorithmProvider(hAlg, 0);
   return hexOut;
+#else
+  EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+  if (!ctx) return {};
+  std::string hexOut;
+  if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) == 1) {
+    char buf[65536];
+    bool ok = true;
+    while (in.good()) {
+      in.read(buf, sizeof(buf));
+      std::streamsize n = in.gcount();
+      if (n > 0) {
+        if (EVP_DigestUpdate(ctx, buf, static_cast<size_t>(n)) != 1) {
+          ok = false;
+          break;
+        }
+      }
+    }
+    unsigned char digest[EVP_MAX_MD_SIZE] = {};
+    unsigned int dlen = 0;
+    if (ok && EVP_DigestFinal_ex(ctx, digest, &dlen) == 1) {
+      static const char* kHex = "0123456789abcdef";
+      hexOut.reserve(dlen * 2);
+      for (unsigned int i = 0; i < dlen; ++i) {
+        hexOut.push_back(kHex[(digest[i] >> 4) & 0x0F]);
+        hexOut.push_back(kHex[digest[i] & 0x0F]);
+      }
+    }
+  }
+  EVP_MD_CTX_free(ctx);
+  return hexOut;
+#endif
 }
 
 UpdateManager::UpdateManager(std::string currentVersion, ExitCallback onRequestExit)
@@ -559,6 +599,13 @@ bool UpdateManager::startInstallAsync() {
 }
 
 void UpdateManager::runCheck() {
+#ifndef _WIN32
+  std::lock_guard lock(mutex_);
+  status_.state = UpdateState::UpToDate;
+  status_.latestVersion = currentVersion_;
+  status_.error.clear();
+  return;
+#else
   {
     std::lock_guard lock(mutex_);
     if (status_.state == UpdateState::Downloading ||
@@ -597,9 +644,16 @@ void UpdateManager::runCheck() {
   status_.state = (isNewerVersion(currentVersion_, rel.version) && !rel.installerUrl.empty())
                       ? UpdateState::Available
                       : UpdateState::UpToDate;
+#endif
 }
 
 void UpdateManager::runDownloadAndInstall() {
+#ifndef _WIN32
+  std::lock_guard lock(mutex_);
+  status_.state = UpdateState::Error;
+  status_.error = "Auto-atualizacao gerenciada via Docker/container no Linux";
+  return;
+#else
   ReleaseInfo rel;
   {
     std::lock_guard lock(mutex_);
@@ -675,6 +729,7 @@ void UpdateManager::runDownloadAndInstall() {
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
     onRequestExit_();
   }
+#endif
 }
 
 UpdateStatus UpdateManager::getStatus() const {

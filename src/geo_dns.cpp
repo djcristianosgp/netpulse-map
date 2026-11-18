@@ -1,3 +1,4 @@
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -9,6 +10,16 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <winhttp.h>
+#else
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
+#include <cctype>
+#include <cstring>
+#endif
 
 #include "geo_dns.hpp"
 
@@ -157,12 +168,13 @@ std::vector<std::string> splitJsonArrayObjects(const std::string& body) {
 }
 
 struct HttpResult {
-  DWORD statusCode = 0;
+  uint32_t statusCode = 0;
   std::string body;
   int rateRemaining = -1;
   int rateTtlSec = -1;
 };
 
+#ifdef _WIN32
 struct WinHttpHandle {
   HINTERNET h = nullptr;
   ~WinHttpHandle() {
@@ -242,6 +254,92 @@ HttpResult winHttpRequest(const wchar_t* method,
   }
   return res;
 }
+#else
+HttpResult posixHttpRequest(const char* method,
+                            const char* host,
+                            uint16_t port,
+                            const char* path,
+                            const std::string* postBody) {
+  HttpResult res;
+  addrinfo hints{};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  addrinfo* resList = nullptr;
+  std::string portStr = std::to_string(port);
+  if (getaddrinfo(host, portStr.c_str(), &hints, &resList) != 0 || !resList) {
+    return res;
+  }
+
+  int sock = -1;
+  for (addrinfo* ai = resList; ai != nullptr; ai = ai->ai_next) {
+    sock = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+    if (sock < 0) continue;
+    timeval tv{5, 0};
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    if (connect(sock, ai->ai_addr, ai->ai_addrlen) == 0) break;
+    close(sock);
+    sock = -1;
+  }
+  freeaddrinfo(resList);
+  if (sock < 0) return res;
+
+  std::string req = std::string(method) + " " + path + " HTTP/1.0\r\n" +
+                    "Host: " + host + "\r\n" +
+                    "User-Agent: NetPulseMap/1.0\r\n" +
+                    "Connection: close\r\n";
+  if (postBody) {
+    req += "Content-Type: application/json\r\nContent-Length: " +
+           std::to_string(postBody->size()) + "\r\n\r\n" + *postBody;
+  } else {
+    req += "\r\n";
+  }
+
+  size_t sent = 0;
+  while (sent < req.size()) {
+    ssize_t n = send(sock, req.data() + sent, req.size() - sent, MSG_NOSIGNAL);
+    if (n <= 0) {
+      close(sock);
+      return res;
+    }
+    sent += static_cast<size_t>(n);
+  }
+
+  std::string raw;
+  char buf[4096];
+  while (true) {
+    ssize_t n = recv(sock, buf, sizeof(buf), 0);
+    if (n <= 0) break;
+    raw.append(buf, static_cast<size_t>(n));
+    if (raw.size() > 2 * 1024 * 1024) break;
+  }
+  close(sock);
+
+  size_t hdrEnd = raw.find("\r\n\r\n");
+  if (hdrEnd == std::string::npos) return res;
+  std::string headers = raw.substr(0, hdrEnd);
+  res.body = raw.substr(hdrEnd + 4);
+
+  size_t sp1 = headers.find(' ');
+  if (sp1 != std::string::npos) {
+    res.statusCode = static_cast<uint32_t>(std::atoi(headers.c_str() + sp1 + 1));
+  }
+
+  std::istringstream hss(headers);
+  std::string line;
+  while (std::getline(hss, line)) {
+    std::string lower;
+    lower.reserve(line.size());
+    for (char c : line) lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    if (lower.rfind("x-rl:", 0) == 0) {
+      res.rateRemaining = std::atoi(line.c_str() + 5);
+    } else if (lower.rfind("x-ttl:", 0) == 0) {
+      res.rateTtlSec = std::atoi(line.c_str() + 6);
+    }
+  }
+  return res;
+}
+#endif
 
 } // namespace
 
@@ -522,12 +620,21 @@ size_t GeoDnsService::cachedDnsCount() const {
 }
 
 void GeoDnsService::fetchHostGeo() {
+#ifdef _WIN32
   HttpResult res = winHttpRequest(
       L"GET",
       L"ip-api.com",
       INTERNET_DEFAULT_HTTP_PORT,
       L"/json/?fields=status,country,countryCode,regionName,city,lat,lon,isp,query",
       nullptr);
+#else
+  HttpResult res = posixHttpRequest(
+      "GET",
+      "ip-api.com",
+      80,
+      "/json/?fields=status,country,countryCode,regionName,city,lat,lon,isp,query",
+      nullptr);
+#endif
 
   if (res.statusCode == 200 && !res.body.empty()) {
     HostGeo hg = parseIpApiSelfJson(res.body);
@@ -548,12 +655,21 @@ void GeoDnsService::fetchGeoBatch(const std::vector<std::string>& ips) {
   }
   payload.push_back(']');
 
+#ifdef _WIN32
   HttpResult res = winHttpRequest(
       L"POST",
       L"ip-api.com",
       INTERNET_DEFAULT_HTTP_PORT,
       L"/batch?fields=status,country,countryCode,regionName,city,lat,lon,isp,org,as,query",
       &payload);
+#else
+  HttpResult res = posixHttpRequest(
+      "POST",
+      "ip-api.com",
+      80,
+      "/batch?fields=status,country,countryCode,regionName,city,lat,lon,isp,org,as,query",
+      &payload);
+#endif
 
   const uint64_t now = nowEpochMs();
 
@@ -670,8 +786,8 @@ void GeoDnsService::dnsWorkerLoop(std::stop_token stopToken) {
     sockaddr_storage ss{};
     int ssLen = 0;
 
-    IN_ADDR in4{};
-    IN6_ADDR in6{};
+    struct in_addr in4{};
+    struct in6_addr in6{};
     if (inet_pton(AF_INET, ip.c_str(), &in4) == 1) {
       auto* sa = reinterpret_cast<sockaddr_in*>(&ss);
       sa->sin_family = AF_INET;

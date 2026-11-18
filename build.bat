@@ -2,7 +2,7 @@
 setlocal
 
 set "APP_VER=%~1"
-if not defined APP_VER set "APP_VER=1.0.0"
+if not defined APP_VER set "APP_VER=2.0.0"
 
 where cl >nul 2>&1
 if not errorlevel 1 goto :msvc_ready

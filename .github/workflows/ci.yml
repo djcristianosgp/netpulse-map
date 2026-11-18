@@ -7,8 +7,8 @@ on:
     branches: [ main, master ]
 
 jobs:
-  build-and-test:
-    name: Build C++20 & Run Native Tests
+  windows-build-and-test:
+    name: Windows C++20 (MSVC) & Tests
     runs-on: windows-latest
 
     steps:
@@ -16,7 +16,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Build C++20 binaries
-        run: .\build.bat
+        run: .\build.bat 2.0.0
 
       - name: Run C++ native test suite
         run: .\build\test_core.exe
@@ -25,4 +25,35 @@ jobs:
         run: |
           node --check static/topo.js
           node --check static/map-canvas.js
+          node --check static/lan-topo.js
+          node --check static/noc-dashboard.js
+          node --check static/app.js
+
+  linux-cmake-and-test:
+    name: Linux C++20 (CMake + OpenSSL) & Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake g++ libssl-dev nodejs
+
+      - name: Configure & Build with CMake
+        run: |
+          cmake -S . -B build-linux -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-linux -j$(nproc)
+
+      - name: Run CTest native suite
+        run: ctest --test-dir build-linux --output-on-failure
+
+      - name: Verify frontend JS syntax
+        run: |
+          node --check static/topo.js
+          node --check static/map-canvas.js
+          node --check static/lan-topo.js
+          node --check static/noc-dashboard.js
           node --check static/app.js

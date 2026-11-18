@@ -23,7 +23,9 @@
 ## 3. Proteções Adicionais
 
 - **CSRF**: todas as requisições mutáveis autenticadas por cookie exigem cabeçalho `X-CSRF-Token` correspondente à sessão.
-- **Confirmação Explícita**: ações destrutivas exigem `"confirm": true` no JSON validado por `JsonValue`.
-- **Reversão**: bloqueios de firewall são rastreados em `data/blocked_ips.tsv` e `security_audit.tsv` com reversão via `POST /api/action/unblock-ip`.
+- **Confirmação Explícita**: ações destrutivas (encerrar processo, bloqueio/reversão de IP, firewall granular, remoção de regras/alvos/dispositivos/canais, prune manual do banco) exigem `"confirm": true` no JSON validado por `JsonValue`.
+- **Reversão**: bloqueios de IP (`POST /api/action/unblock-ip`, `data/blocked_ips.tsv`) e regras granulares de firewall por IP/porta/executável (`POST /api/security/firewall/delete` + `removeOsFirewallRule`) são auditados e reversíveis em tempo de execução.
+- **Notificações & Segredos**: endpoints externos em `NotificationEngine` exigem `https://` para destinos remotos (`http://` permitido apenas em loopback local), assinam webhooks com HMAC-SHA256 (`X-NetPulse-Signature`) e mascaram segredos/tokens (`secretPreview`) em todas as respostas GET.
+- **Exportador `/metrics` & NOC**: Prometheus `/metrics`, `/api/v1/openapi.json` e `/api/v1/noc/overview` exigem autenticação (`Viewer+`); o Modo NOC TV opera estritamente em modo somente leitura sem controles de mutação.
 - **Rate Limiting**: limite por IP na camada HTTP e bloqueio temporário contra brute force em `/api/auth/login`.
 - **Path Traversal & Command Injection**: canonicalização estrita de caminhos em `static/` e `assets/`; `traceroute` no Linux via `fork`/`execlp` sem shell; updater com verificação SHA-256 obrigatória (fail-closed) e URLs restritas ao GitHub oficial.

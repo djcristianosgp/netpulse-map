@@ -54,6 +54,8 @@ jobs:
         run: |
           node --check static/topo.js
           node --check static/map-canvas.js
+          node --check static/lan-topo.js
+          node --check static/noc-dashboard.js
           node --check static/app.js
 
       - name: Build, test and generate Windows installer + portable ZIP
@@ -82,11 +84,11 @@ jobs:
             dist/NetPulse2D-Portable-x64.zip
             dist/checksums.txt
           body: |
-            ## 🌐 NetPulse 2D v${{ steps.get_version.outputs.version }}
+            ## 🌐 NetPulse Platform v${{ steps.get_version.outputs.version }}
 
-            Mapa planetario 2D em tempo real de conexoes de rede com motor nativo **C++20 (`/O2`)**.
+            Plataforma profissional nativa de observabilidade, diagnóstico e segurança de redes em **C++20 (`/O2`)**, com 12 módulos integrados e análise 100% determinística (zero IA).
 
             ### 📦 Artefatos desta Release
-            - **Instalador Windows (x64)**: `NetPulse2D-Setup-x64.exe` (instalacao por usuario sem exigir admin ou para todos os usuarios).
-            - **Pacote Portatil (x64)**: `NetPulse2D-Portable-x64.zip` (extraia e execute `netpulse.exe`).
+            - **Instalador Windows (x64)**: `NetPulse2D-Setup-x64.exe` (instalação por usuário ou para todos os usuários).
+            - **Pacote Portátil (x64)**: `NetPulse2D-Portable-x64.zip` (extraia e execute `netpulse.exe`).
             - **Checksums SHA-256**: `checksums.txt`.

@@ -2106,6 +2106,117 @@ int testNotificationsPrometheusAndOpenApi() {
   return 0;
 }
 
+int testPlatformBenchmarksAndStabilization() {
+  // 1. Kernel telemetry read latency benchmark across 5 cycles
+  NetMonitor mon;
+  uint64_t worstPollUs = 0;
+  for (int i = 0; i < 5; ++i) {
+    auto snap = mon.poll(1700005000000ULL + static_cast<uint64_t>(i) * 1000ULL);
+    if (snap.pollLatencyUs > worstPollUs) worstPollUs = snap.pollLatencyUs;
+  }
+  CHECK(worstPollUs < 250000ULL);
+
+  // 2. Large LAN topology build + serialize benchmark (128 LAN hosts + 50 active sockets)
+  InterfaceInventorySnapshot ifSnap;
+  NetworkInterfaceInfo nic;
+  nic.id = "if-bench";
+  nic.name = "eth0";
+  nic.type = "ethernet";
+  nic.operStatus = "up";
+  nic.isDefaultRoute = true;
+  nic.ipv4 = {"10.10.0.10"};
+  nic.gateways = {"10.10.0.1"};
+  nic.dnsServers = {"1.1.1.1"};
+  ifSnap.interfaces = {nic};
+  ifSnap.primaryIfId = "if-bench";
+  ifSnap.primaryIfName = "eth0";
+  ifSnap.primaryGateway = "10.10.0.1";
+
+  std::vector<LanDeviceRecord> devs;
+  devs.reserve(128);
+  for (int i = 2; i <= 129; ++i) {
+    LanDeviceRecord d;
+    d.deviceKey = "mac:" + std::to_string(i);
+    d.ip = "10.10.0." + std::to_string(i);
+    d.mac = "00:11:22:33:44:" + std::to_string(10 + (i % 80));
+    d.vendor = "BenchVendor";
+    d.online = true;
+    devs.push_back(std::move(d));
+  }
+
+  TelemetrySnapshot tel;
+  tel.timestampMs = 1700005010000ULL;
+  for (int i = 0; i < 50; ++i) {
+    SocketEntry s;
+    s.key = "TCP:" + std::to_string(40000 + i);
+    s.protocol = "TCP";
+    s.localIp = "10.10.0.10";
+    s.remoteIp = "198.51.100." + std::to_string(1 + i);
+    s.remotePort = 443;
+    s.state = "ESTABLISHED";
+    s.pid = static_cast<uint32_t>(1000 + i);
+    s.processName = "worker.exe";
+    s.scope = IpScope::Public;
+    tel.connections.push_back(std::move(s));
+  }
+
+  const auto tStart = std::chrono::steady_clock::now();
+  auto topo = buildLanTopology(tel.timestampMs, "BENCH-HOST", ifSnap, devs, {}, &tel);
+  const std::string topoJson = serializeLanTopologyJson(topo);
+  const auto topoUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                          std::chrono::steady_clock::now() - tStart).count();
+  CHECK(topo.totalDevices == 128);
+  CHECK(!topoJson.empty());
+  CHECK(topoUs < 100000);
+
+  // 3. Intelligence burst stabilization (20 consecutive ticks -> cooldown stops alert storm)
+  std::filesystem::path dir = std::filesystem::temp_directory_path() / "netpulse_fase10_bench_test";
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+  HistoryStore history(dir);
+  IntelligenceEngine intel(history);
+  GeoDnsService geoDns(dir / "geo.tsv");
+
+  TelemetrySnapshot burstSnap;
+  burstSnap.nic.activeInterfaces = 1;
+  burstSnap.publicConnections = 5;
+  SocketEntry bs;
+  bs.key = "TCP:60001:198.51.100.200:4444:777";
+  bs.protocol = "TCP";
+  bs.remoteIp = "198.51.100.200";
+  bs.remotePort = 4444;
+  bs.state = "ESTABLISHED";
+  bs.pid = 777;
+  bs.processName = "burst.exe";
+  bs.scope = IpScope::Public;
+  burstSnap.connections.push_back(bs);
+
+  for (int t = 0; t < 20; ++t) {
+    burstSnap.timestampMs = 1700005100000ULL + static_cast<uint64_t>(t) * 1000ULL;
+    intel.processTelemetry(burstSnap, geoDns);
+  }
+  const auto alertsAfterBurst = intel.getRecentAlertsSnapshot(100);
+  CHECK(alertsAfterBurst.size() <= 4); // Cooldown prevents repeated duplicate alert storm
+
+  // 4. OpenAPI & JSON throughput benchmark
+  const auto oaStart = std::chrono::steady_clock::now();
+  for (int i = 0; i < 10; ++i) {
+    volatile size_t sz = buildOpenApiV1SpecJson("2.0.0").size();
+    CHECK(sz > 1000);
+  }
+  const auto oaMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - oaStart).count();
+  CHECK(oaMs < 500);
+
+  std::cout << "  [BENCH] poll_worst=" << worstPollUs << "us, topo128=" << topoUs
+            << "us, openapi10x=" << oaMs << "ms, burstAlerts=" << alertsAfterBurst.size() << "\n";
+
+  history.stop();
+  std::filesystem::remove_all(dir, ec);
+  std::cout << "[PASS] testPlatformBenchmarksAndStabilization\n";
+  return 0;
+}
+
 int main() {
 #ifdef _WIN32
   WSADATA wsa{};
@@ -2134,6 +2245,7 @@ int main() {
   rc |= testLanTopologyBuilder();
   rc |= testIntelligenceAndSecurityEngine();
   rc |= testNotificationsPrometheusAndOpenApi();
+  rc |= testPlatformBenchmarksAndStabilization();
 
 #ifdef _WIN32
   WSACleanup();

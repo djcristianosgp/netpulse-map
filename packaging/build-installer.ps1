@@ -1,5 +1,5 @@
 param(
-  [string]$Version = "1.0.0",
+  [string]$Version = "2.0.0",
   [switch]$SkipInstaller
 )
 
@@ -38,6 +38,10 @@ Copy-Item (Join-Path $Root "build\netpulse.exe") -Destination $StagingDir
 Copy-Item (Join-Path $Root "static") -Destination (Join-Path $StagingDir "static") -Recurse
 Copy-Item (Join-Path $Root "assets") -Destination (Join-Path $StagingDir "assets") -Recurse
 Copy-Item (Join-Path $Root "README.md") -Destination $StagingDir
+foreach ($doc in @("ARCHITECTURE.md", "DATABASE.md", "SECURITY.md", "CHANGELOG.md", "ROADMAP.md")) {
+  $docPath = Join-Path $Root $doc
+  if (Test-Path $docPath) { Copy-Item $docPath -Destination $StagingDir }
+}
 
 Write-Host "[4/5] Gerando pacote portatil ZIP..."
 $PortableZip = Join-Path $DistDir "NetPulse2D-Portable-x64.zip"

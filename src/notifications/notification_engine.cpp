@@ -13,6 +13,7 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 #endif
 
@@ -267,6 +268,7 @@ bool httpPostJson(const std::string& url,
     SSL* ssl = SSL_new(ctx);
     SSL_set_fd(ssl, fd);
     SSL_set_tlsext_host_name(ssl, host.c_str());
+    SSL_set1_host(ssl, host.c_str());
     SSL_set_verify(ssl, SSL_VERIFY_PEER, nullptr);
     if (SSL_connect(ssl) != 1) {
       SSL_free(ssl);

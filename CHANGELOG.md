@@ -2,6 +2,13 @@
 
 Todas as mudanças relevantes do **NetPulse** serão documentadas neste arquivo.
 
+## [2.0.0] - 2026-11-18 — Fase 10: NetPulse 2.0 Platform Release (Estabilização, Benchmarks, CI Multiplataforma & Empacotamento)
+
+### Adicionado e Consolidado
+- **Benchmarks & Estabilização (`tests/test_core.cpp`)**: nova suíte `testPlatformBenchmarksAndStabilization` validando orçamento de latência do `NetMonitor::poll`, geração/serialização de topologia LAN com 128 hosts e 50 sockets, estabilidade do motor EWMA/cooldown em rajadas de 20 ticks e throughput do OpenAPI 3.0.3.
+- **CI Multiplataforma Windows + Linux (`.github/workflows/ci.yml`, `.github/workflows/release.yml`)**: job paralelo `linux-cmake-and-test` (`ubuntu-latest`, CMake + OpenSSL + `ctest`) somado ao job MSVC `windows-latest`, com verificação `node --check` em todos os 5 scripts JS (`topo.js`, `map-canvas.js`, `lan-topo.js`, `noc-dashboard.js`, `app.js`).
+- **Empacotamento & Segurança (`packaging/build-installer.ps1`, `build.bat`, `CMakeLists.txt`, `Dockerfile`, `src/notifications/notification_engine.cpp`)**: versão unificada `2.0.0`, inclusão da documentação técnica completa no pacote portátil ZIP, verificação de hostname `SSL_set1_host` no transporte HTTPS Linux e atualização consolidada de `README.md`, `ARCHITECTURE.md`, `SECURITY.md` e `ROADMAP.md`.
+
 ## [1.12.0] - 2026-11-18 — Fase 9: API v1 Documentada, Prometheus & Notificações
 
 ### Adicionado

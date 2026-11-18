@@ -8,41 +8,48 @@ Todas as análises comportamentais e diagnósticos operam de forma **100% determ
 
 ---
 
-## 2. Diagrama de Arquitetura (Fase 0 → Alvo Modular)
+## 2. Diagrama de Arquitetura (Plataforma Modular NetPulse v2.0.0)
 
 ```mermaid
 flowchart TB
-    UI["Web UI (Canvas2D + Módulos JS)"]
-    API["API Layer (ApiRouter /api/v1/* + WsServer HTTP/HTTPS/WSS)"]
-    SEC["Security Layer (AuthManager RBAC · RateLimiter · AuditLog · TlsContext)"]
-    CORE["Core Engine (NetMonitor · GeoDnsService · ServiceMonitor · TracerouteService)"]
-    HIST["History Engine (TSV Fase 0 → SQLite WAL Fase 1)"]
-    OS["OS Adapters (_WIN32 iphlpapi/WinHTTP/SChannel/netsh | Linux /proc/OpenSSL/exec)"]
+    UI["Web UI (12 Módulos + LanTopologyCanvas + Modo NOC TV)"]
+    API["API Layer (ApiRouter /api/v1/* · OpenAPI 3.0.3 · Prometheus /metrics · WsServer TLS)"]
+    SEC["Security & Intelligence (AuthManager RBAC · AuditLog · IntelligenceEngine EWMA Zero-IA)"]
+    OBS["Observability Engines (NetworkQuality · InterfaceMonitor · DiscoveryEngine · TopologyBuilder · NotificationEngine)"]
+    CORE["Core Telemetry (NetMonitor · GeoDnsService · ServiceMonitor · TracerouteService)"]
+    HIST["History Engine (SQLite 3.54.1 WAL schema_migrations v7 · Retention)"]
+    OS["OS Adapters (_WIN32 iphlpapi/WinHTTP/SChannel/netsh | Linux /proc/OpenSSL/fork+exec)"]
 
-    UI <-->|"HTTPS / WSS + Cookie HttpOnly + X-CSRF-Token"| API
+    UI <-->|"HTTPS / WSS + HttpOnly + CSRF"| API
     API --> SEC
+    API --> OBS
     API --> CORE
     API --> HIST
     CORE --> HIST
-    CORE --> OS
+    OBS --> HIST
+    SEC --> HIST
     SEC --> OS
+    OBS --> OS
+    CORE --> OS
 ```
 
 ---
 
-## 3. Estrutura de Módulos (Estado Atual — Pós-Fase 0)
+## 3. Estrutura de Módulos (NetPulse v2.0.0)
 
 | Módulo / Diretório | Arquivos | Responsabilidade |
 | :--- | :--- | :--- |
-| **Core Utilities** | `src/core/json_lite.hpp`, `src/core/json_lite.cpp` | Parser RFC-8259 estrito com limite de profundidade (32) e tamanho (64 KB). |
+| **Core Utilities & Specs** | `src/core/json_lite.*`, `src/api/prometheus_openapi.*` | Parser RFC-8259 estrito, exportador Prometheus `/metrics` e especificação OpenAPI 3.0.3 (`/api/v1/openapi.json`). |
 | **Models & Serializer** | `src/models.hpp`, `src/serializer.hpp`, `src/version.hpp` | Estruturas de telemetria e serialização JSON para snapshots em tempo real. |
-| **Network Collector** | `src/net_monitor.hpp`, `src/net_monitor.cpp` | Coleta de sockets TCP/UDP IPv4/IPv6, PID/executável, EStats/Process IO e NIC RX/TX. |
-| **GeoIP & rDNS** | `src/geo_dns.hpp`, `src/geo_dns.cpp`, `src/mmdb_reader.*` | Leitor offline MaxMind DB (`.mmdb`), batch GeoIP cacheado e pool assíncrono de rDNS. |
-| **Service & Trace** | `src/service_monitor.*`, `src/traceroute.*` | Probes TCP contínuos (âncoras regionais + customizados) e traceroute ICMP/exec. |
-| **Security Engine** | `src/security/auth_manager.*`, `audit_log.*`, `rate_limiter.*`, `tls_context.*` | Tokens RBAC (`Viewer`, `Operator`, `Administrator`), sessões com expiração, CSRF, TLS (SChannel/OpenSSL), rate limit e auditoria operacional. |
-| **API & Transport** | `src/api/api_router.*`, `src/ws_server.*` | Roteamento `/api/*` e `/api/v1/*`, validação de `Host`/`Origin`, headers de segurança, path traversal guard e WebSocket autenticado. |
-| **Host Actions** | `src/actions.*`, `src/tray_host.*`, `src/updater.*` | Encerramento de processos protegidos, bloqueio/reversão de firewall, system tray Win32 e auto-updater SHA-256 fail-closed. |
-| **Persistence (Fase 0)** | `src/history_store.*`, `src/settings_store.*` | Persistência TSV atual (`events_history.tsv`, `service_metrics.tsv`, `settings.tsv`, `auth_tokens.tsv`, `security_audit.tsv`, `blocked_ips.tsv`). |
+| **Network Telemetry** | `src/net_monitor.*`, `src/network/interface_monitor.*` | Sockets TCP/UDP IPv4/IPv6, PID/executável, EStats/Process IO e inventário Multi-WAN RX/TX/gateways/DNS. |
+| **GeoIP, rDNS & Trace** | `src/geo_dns.*`, `src/mmdb_reader.*`, `src/service_monitor.*`, `src/traceroute.*` | Leitor `.mmdb` offline, GeoIP/rDNS em lote, âncoras TCP, traceroute periódico com Route Diff FNV-1a e ASN. |
+| **Quality Engine** | `src/quality/network_quality_engine.*` | Sondagem ICMP/TCP/DNS RFC-1035, percentis P50–P99, jitter, packet loss e diagnóstico determinístico. |
+| **Discovery & Topology** | `src/discovery/discovery_engine.*`, `src/discovery/topology_builder.*` | ARP passivo, scan ativo `/24`, IEEE OUI offline, MAC LAA e grafo LAN com evidência por aresta. |
+| **Intelligence Determinística** | `src/intelligence/intelligence_engine.*` | 9 detectores comportamentais, baselines EWMA, 6 regras customizáveis, índice de risco 0–100 e allow/blocklist (sem IA). |
+| **Notifications Engine** | `src/notifications/notification_engine.*` | Fila assíncrona Webhook (HMAC-SHA256 RFC-2104), Discord e Telegram com cooldown e validação SSRF/HTTPS. |
+| **Security Engine** | `src/security/auth_manager.*`, `audit_log.*`, `rate_limiter.*`, `tls_context.*` | Tokens RBAC (`Viewer`/`Operator`/`Administrator`), sessões, CSRF, TLS nativo, rate limit e auditoria operacional. |
+| **API, Actions & History** | `src/api/api_router.*`, `src/ws_server.*`, `src/actions.*`, `src/storage/sqlite_db.*`, `src/history_store.*` | Rotas `/api/v1/*` + `/api/noc/overview`, firewall granular reversível e persistência SQLite WAL (`v7`). |
+| **Frontend Modular** | `static/index.html`, `styles.css`, `app.js`, `map-canvas.js`, `lan-topo.js`, `noc-dashboard.js`, `topo.js` | Mapa planetário, Hub de 12 Módulos, Topologia LAN e Wallboard Modo NOC TV somente leitura. |
 
 ---
 

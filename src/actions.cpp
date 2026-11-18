@@ -55,20 +55,24 @@ bool isValidIpAddress(const std::string& ip) {
   return inet_pton(AF_INET6, ip.c_str(), &in6) == 1;
 }
 
+bool isLoopbackOrUnspecifiedIp(const std::string& ip) {
+  return ip == "127.0.0.1" || ip == "::1" || ip == "0.0.0.0" || ip == "::";
+}
+
 bool isProtectedSystemProcess(uint32_t pid, const std::string& procName) {
 #ifdef _WIN32
   if (pid <= 4 || pid == GetCurrentProcessId()) return true;
   const std::string lower = toLowerAscii(procName);
-  return lower == "system" || lower == "system idle" ||
-         lower == "csrss.exe" || lower == "smss.exe" ||
+  return lower == "system" || lower == "system idle" || lower == "registry" ||
+         lower == "csrss.exe" || lower == "smss.exe" || lower == "lsaiso.exe" ||
          lower == "wininit.exe" || lower == "winlogon.exe" ||
          lower == "services.exe" || lower == "lsass.exe" ||
-         lower == "dwm.exe";
+         lower == "dwm.exe" || lower == "svchost.exe";
 #else
   if (pid <= 1 || pid == static_cast<uint32_t>(getpid())) return true;
   const std::string lower = toLowerAscii(procName);
   return lower == "systemd" || lower == "init" || lower == "sshd" ||
-         lower == "dockerd" || lower == "containerd";
+         lower == "dockerd" || lower == "containerd" || lower == "netpulse";
 #endif
 }
 
@@ -105,21 +109,9 @@ bool terminateTargetProcess(uint32_t pid, const std::string& procName, std::stri
 #endif
 }
 
-bool blockIpInWindowsFirewall(const std::string& ip, bool isElevated, std::string& outError) {
 #ifdef _WIN32
-  if (!isValidIpAddress(ip)) {
-    outError = "Endereco IP invalido";
-    return false;
-  }
-  if (ip == "127.0.0.1" || ip == "::1" || ip == "0.0.0.0" || ip == "::") {
-    outError = "IP de loopback/sistema nao pode ser bloqueado";
-    return false;
-  }
-
-  const std::wstring wIp = utf8ToWide(ip);
-  const std::wstring params = L"advfirewall firewall add rule name=\"NetPulse2D Block " + wIp +
-                              L"\" dir=out action=block remoteip=" + wIp;
-
+namespace {
+bool runNetshFirewall(const std::wstring& params, bool isElevated, std::string& outError) {
   SHELLEXECUTEINFOW sei{};
   sei.cbSize = sizeof(sei);
   sei.fMask = SEE_MASK_NOCLOSEPROCESS;
@@ -147,10 +139,51 @@ bool blockIpInWindowsFirewall(const std::string& ip, bool isElevated, std::strin
     }
   }
   return true;
+}
+} // namespace
+#endif
+
+bool blockIpInWindowsFirewall(const std::string& ip, bool isElevated, std::string& outError) {
+#ifdef _WIN32
+  if (!isValidIpAddress(ip)) {
+    outError = "Endereco IP invalido";
+    return false;
+  }
+  if (isLoopbackOrUnspecifiedIp(ip)) {
+    outError = "IP de loopback/sistema nao pode ser bloqueado";
+    return false;
+  }
+
+  const std::wstring wIp = utf8ToWide(ip);
+  const std::wstring params = L"advfirewall firewall add rule name=\"NetPulse2D Block " + wIp +
+                              L"\" dir=out action=block remoteip=" + wIp;
+  return runNetshFirewall(params, isElevated, outError);
 #else
   (void)ip;
   (void)isElevated;
   outError = "Bloqueio automatico via firewall disponivel apenas no Windows";
+  return false;
+#endif
+}
+
+bool unblockIpInWindowsFirewall(const std::string& ip, bool isElevated, std::string& outError) {
+#ifdef _WIN32
+  if (!isValidIpAddress(ip)) {
+    outError = "Endereco IP invalido";
+    return false;
+  }
+  if (isLoopbackOrUnspecifiedIp(ip)) {
+    outError = "IP de loopback/sistema nao permitido";
+    return false;
+  }
+
+  const std::wstring wIp = utf8ToWide(ip);
+  const std::wstring params = L"advfirewall firewall delete rule name=\"NetPulse2D Block " + wIp + L"\"";
+  return runNetshFirewall(params, isElevated, outError);
+#else
+  (void)ip;
+  (void)isElevated;
+  outError = "Reversao de firewall disponivel apenas no Windows";
   return false;
 #endif
 }

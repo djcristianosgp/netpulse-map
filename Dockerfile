@@ -10,9 +10,15 @@ WORKDIR /src
 COPY src/ ./src/
 
 RUN mkdir -p /out && \
-    g++ -std=c++20 -O2 -Wall -Wextra -pthread \
-      -DNETPULSE_VERSION=\"1.0.0\" \
+    g++ -std=c++20 -O2 -Wall -Wextra -pthread -Isrc \
+      -DNETPULSE_VERSION=\"1.3.0\" \
       src/main.cpp \
+      src/core/json_lite.cpp \
+      src/security/auth_manager.cpp \
+      src/security/audit_log.cpp \
+      src/security/rate_limiter.cpp \
+      src/security/tls_context.cpp \
+      src/api/api_router.cpp \
       src/net_monitor.cpp \
       src/geo_dns.cpp \
       src/ws_server.cpp \
@@ -25,7 +31,7 @@ RUN mkdir -p /out && \
       src/actions.cpp \
       src/tray_host.cpp \
       -o /out/netpulse \
-      -lcrypto
+      -lssl -lcrypto
 
 # Stage 2: Minimal runtime image
 FROM debian:bookworm-slim
@@ -45,4 +51,4 @@ RUN mkdir -p /app/data
 EXPOSE 8740
 
 ENTRYPOINT ["/app/netpulse"]
-CMD ["--no-browser", "--host", "0.0.0.0", "--port", "8740"]
+CMD ["--no-browser", "--host", "0.0.0.0", "--allow-remote", "--port", "8740"]

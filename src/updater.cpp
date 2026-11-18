@@ -664,7 +664,13 @@ void UpdateManager::runDownloadAndInstall() {
   }
 
   std::string expectedHash;
-  if (!rel.checksumsUrl.empty()) {
+  if (rel.checksumsUrl.empty()) {
+    std::lock_guard lock(mutex_);
+    status_.state = UpdateState::Error;
+    status_.error = "Release sem checksums.txt: instalacao bloqueada por seguranca";
+    return;
+  }
+  {
     auto csResp = httpsGetUrl(rel.checksumsUrl);
     if (!csResp.error.empty()) {
       std::lock_guard lock(mutex_);
@@ -673,6 +679,24 @@ void UpdateManager::runDownloadAndInstall() {
       return;
     }
     expectedHash = parseSha256FromChecksums(csResp.body, "NetPulse2D-Setup-x64.exe");
+    if (expectedHash.empty()) {
+      std::lock_guard lock(mutex_);
+      status_.state = UpdateState::Error;
+      status_.error = "Hash SHA-256 ausente em checksums.txt";
+      return;
+    }
+  }
+
+  auto isTrustedReleaseUrl = [](const std::string& url) {
+    return url.rfind("https://github.com/", 0) == 0 ||
+           url.rfind("https://objects.githubusercontent.com/", 0) == 0 ||
+           url.rfind("https://release-assets.githubusercontent.com/", 0) == 0;
+  };
+  if (!isTrustedReleaseUrl(rel.installerUrl) || !isTrustedReleaseUrl(rel.checksumsUrl)) {
+    std::lock_guard lock(mutex_);
+    status_.state = UpdateState::Error;
+    status_.error = "URL de release nao confiavel";
+    return;
   }
 
   wchar_t tempDir[MAX_PATH] = {};

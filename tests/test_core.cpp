@@ -1,28 +1,45 @@
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+using SOCKET = int;
+constexpr SOCKET INVALID_SOCKET = -1;
+inline int closesocket(int s) { return ::close(s); }
+#endif
 
 #include "../src/actions.hpp"
+#include "../src/api/api_router.hpp"
+#include "../src/core/json_lite.hpp"
 #include "../src/geo_dns.hpp"
 #include "../src/history_store.hpp"
 #include "../src/mmdb_reader.hpp"
 #include "../src/net_monitor.hpp"
+#include "../src/security/audit_log.hpp"
+#include "../src/security/auth_manager.hpp"
+#include "../src/security/rate_limiter.hpp"
+#include "../src/security/tls_context.hpp"
 #include "../src/serializer.hpp"
 #include "../src/service_monitor.hpp"
 #include "../src/settings_store.hpp"
+#include "../src/traceroute.hpp"
 #include "../src/updater.hpp"
 #include "../src/ws_server.hpp"
 
 #include <cassert>
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -37,6 +54,52 @@ using namespace netpulse;
       return 1;                                                                  \
     }                                                                            \
   } while (0)
+
+namespace {
+
+std::string sendRawHttp(uint16_t port, const std::string& rawReq) {
+  SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (s == INVALID_SOCKET) return {};
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(port);
+  inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+  if (connect(s, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) != 0) {
+    closesocket(s);
+    return {};
+  }
+  size_t off = 0;
+  while (off < rawReq.size()) {
+    int n = send(s, rawReq.data() + off, static_cast<int>(rawReq.size() - off), 0);
+    if (n <= 0) break;
+    off += static_cast<size_t>(n);
+  }
+  std::string resp;
+  char buf[4096];
+  while (true) {
+    int n = recv(s, buf, sizeof(buf), 0);
+    if (n <= 0) break;
+    resp.append(buf, static_cast<size_t>(n));
+  }
+  closesocket(s);
+  return resp;
+}
+
+std::string extractCookieSession(const std::string& httpResp) {
+  size_t pos = httpResp.find("Set-Cookie: np_session=");
+  if (pos == std::string::npos) return {};
+  pos += 23;
+  size_t end = httpResp.find(';', pos);
+  if (end == std::string::npos) end = httpResp.find("\r\n", pos);
+  return httpResp.substr(pos, end - pos);
+}
+
+std::string extractJsonBody(const std::string& httpResp) {
+  size_t pos = httpResp.find("\r\n\r\n");
+  return (pos == std::string::npos) ? std::string{} : httpResp.substr(pos + 4);
+}
+
+} // namespace
 
 int testIpClassification() {
   CHECK(classifyIpString("127.0.0.1") == IpScope::Loopback);
@@ -81,7 +144,6 @@ int testGeoJsonAndCache() {
   CHECK(hg.city == "Campinas");
   CHECK(hg.publicIp == "200.1.2.3");
 
-  // TSV cache roundtrip
   auto tempCache = std::filesystem::temp_directory_path() / "netpulse_test_geo_cache.tsv";
   std::error_code ec;
   std::filesystem::remove(tempCache, ec);
@@ -101,7 +163,6 @@ int testGeoJsonAndCache() {
 }
 
 int testWebSocketRfc6455() {
-  // Official RFC 6455 Section 1.3 vector
   std::string accept = computeWebSocketAcceptKey("dGhlIHNhbXBsZSBub25jZQ==");
   CHECK(accept == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
 
@@ -117,64 +178,298 @@ int testWebSocketRfc6455() {
   CHECK(medFrame[1] == 126);
   CHECK(((static_cast<uint16_t>(medFrame[2]) << 8) | medFrame[3]) == 300);
 
+  CHECK(!isSafeRelativeSubpath("../secret"));
+  CHECK(!isSafeRelativeSubpath("%2e%2e/secret"));
+  CHECK(!isSafeRelativeSubpath("foo\\bar"));
+  CHECK(!isSafeRelativeSubpath("foo%00bar"));
+  CHECK(isSafeRelativeSubpath("index.html"));
+  CHECK(isSafeRelativeSubpath("countries-110m.json"));
+
   std::cout << "[PASS] testWebSocketRfc6455\n";
   return 0;
 }
 
-int testLiveMonitorAndWsLoopback() {
-  NetMonitor mon;
-  uint64_t now = static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::milliseconds>(
-          std::chrono::system_clock::now().time_since_epoch())
-          .count());
-  auto snap = mon.poll(now);
-  CHECK(snap.timestampMs == now);
-  CHECK(snap.pollLatencyUs < 500000); // should be sub-millisecond or a few ms
+int testJsonLiteParser() {
+  JsonValue v;
+  std::string err;
+  const std::string validJson = R"({"name":"Api \"1\"","port":8443,"ok":true,"lat":-23.5,"arr":[1,2]})";
+  CHECK(JsonValue::parse(validJson, v, err));
+  CHECK(v.isObject());
+  CHECK(v.getString("name") == "Api \"1\"");
+  CHECK(v.getInt("port") == 8443);
+  CHECK(v.getBool("ok") == true);
+  CHECK(std::abs(v.getDouble("lat") - (-23.5)) < 1e-6);
+  CHECK(v.get("arr") && v.get("arr")->asArray().size() == 2);
 
-  auto tempRoot = std::filesystem::temp_directory_path() / "netpulse_ws_test";
+  // Reject malformed / trailing / too-deep JSON
+  const std::string trailingJson = R"({"a":1} trailing)";
+  CHECK(!JsonValue::parse(trailingJson, v, err));
+  CHECK(!JsonValue::parse("{\"a\":\"\x01\"}", v, err));
+  std::string deep(40, '[');
+  deep += std::string(40, ']');
+  CHECK(!JsonValue::parse(deep, v, err));
+
+  std::cout << "[PASS] testJsonLiteParser\n";
+  return 0;
+}
+
+int testAuthManagerAndRbac() {
+  auto dir = std::filesystem::temp_directory_path() / "netpulse_auth_test";
   std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+
+  AuthManager auth(dir, "np_adm_test_master_secret_123456");
+  CHECK(AuthManager::constantTimeEquals("abc123", "abc123"));
+  CHECK(!AuthManager::constantTimeEquals("abc123", "abc124"));
+  CHECK(!AuthManager::constantTimeEquals("abc", "abcd"));
+
+  // Login with admin token
+  auto admSess = auth.loginWithToken("np_adm_test_master_secret_123456", "127.0.0.1");
+  CHECK(admSess.has_value());
+  CHECK(admSess->role == Role::Administrator);
+
+  // Create Viewer & Operator tokens
+  std::string vwrTok, oprTok;
+  ApiTokenRecord vwrRec, oprRec;
+  CHECK(auth.createApiToken("tv-monitor", Role::Viewer, 0, vwrTok, vwrRec));
+  CHECK(auth.createApiToken("ops-user", Role::Operator, 0, oprTok, oprRec));
+
+  auto vwrCtx = auth.authenticateHttp("Bearer " + vwrTok, "", "", true);
+  CHECK(vwrCtx.authenticated && vwrCtx.role == Role::Viewer && vwrCtx.csrfValid);
+  CHECK(hasRole(vwrCtx.role, Role::Viewer));
+  CHECK(!hasRole(vwrCtx.role, Role::Operator));
+  CHECK(!hasRole(vwrCtx.role, Role::Administrator));
+
+  auto oprCtx = auth.authenticateHttp("Bearer " + oprTok, "", "", true);
+  CHECK(oprCtx.authenticated && oprCtx.role == Role::Operator);
+  CHECK(hasRole(oprCtx.role, Role::Operator));
+  CHECK(!hasRole(oprCtx.role, Role::Administrator));
+
+  // Cookie CSRF check
+  auto badCsrf = auth.authenticateHttp("", "np_session=" + admSess->sessionId, "wrong-csrf", true);
+  CHECK(badCsrf.authenticated && !badCsrf.csrfValid);
+  auto goodCsrf = auth.authenticateHttp("", "np_session=" + admSess->sessionId, admSess->csrfToken, true);
+  CHECK(goodCsrf.authenticated && goodCsrf.csrfValid);
+
+  // Single-use launch nonce (loopback only)
+  std::string nonce = auth.issueLocalLaunchNonce();
+  CHECK(!auth.exchangeLaunchNonce(nonce, "192.168.1.50").has_value());
+  // Nonce rejected on remote IP, still check fresh nonce on loopback
+  std::string nonce2 = auth.issueLocalLaunchNonce();
+  CHECK(auth.exchangeLaunchNonce(nonce2, "127.0.0.1").has_value());
+  CHECK(!auth.exchangeLaunchNonce(nonce2, "127.0.0.1").has_value()); // single-use
+
+  // Revoke viewer token -> sessions/tokens rejected
+  CHECK(auth.revokeApiToken(vwrRec.id));
+  CHECK(!auth.authenticateHttp("Bearer " + vwrTok, "", "", false).authenticated);
+
+  std::filesystem::remove_all(dir, ec);
+  std::cout << "[PASS] testAuthManagerAndRbac\n";
+  return 0;
+}
+
+int testRateLimiterAndAuditLog() {
+  RateLimiter rl(3, 10000, 30000);
+  CHECK(rl.check("10.0.0.5", 1000).allowed);
+  CHECK(rl.check("10.0.0.5", 1001).allowed);
+  CHECK(rl.check("10.0.0.5", 1002).allowed);
+  auto blocked = rl.check("10.0.0.5", 1003);
+  CHECK(!blocked.allowed && blocked.retryAfterSec >= 1);
+  rl.reset("10.0.0.5");
+  CHECK(rl.check("10.0.0.5", 1004).allowed);
+
+  auto dir = std::filesystem::temp_directory_path() / "netpulse_audit_test";
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+  {
+    AuditLog log(dir / "audit.tsv");
+    uint64_t id = log.record("admin", "administrator", "127.0.0.1", "firewall.block_ip", "1.2.3.4",
+                             "allowed", "Regra aplicada", true);
+    CHECK(id > 0);
+    CHECK(log.markTargetReverted("firewall.block_ip", "1.2.3.4"));
+  }
+  {
+    AuditLog log2(dir / "audit.tsv");
+    auto list = log2.recent(10);
+    CHECK(list.size() == 1);
+    CHECK(list[0].target == "1.2.3.4");
+    CHECK(list[0].reverted == true);
+  }
+  std::filesystem::remove_all(dir, ec);
+  std::cout << "[PASS] testRateLimiterAndAuditLog\n";
+  return 0;
+}
+
+int testLiveSecurityHttpAndWsIntegration() {
+  auto tempRoot = std::filesystem::temp_directory_path() / "netpulse_sec_int_test";
+  std::error_code ec;
+  std::filesystem::remove_all(tempRoot, ec);
   std::filesystem::create_directories(tempRoot / "static", ec);
   std::filesystem::create_directories(tempRoot / "assets", ec);
+  std::filesystem::create_directories(tempRoot / "data", ec);
+  {
+    std::ofstream idx(tempRoot / "static" / "index.html");
+    idx << "<html><body>NetPulse</body></html>";
+  }
 
-  GeoDnsService geoDns(tempRoot / "cache.tsv");
+  NetMonitor mon;
+  auto snap = mon.poll(1700000000000ULL);
+  CHECK(snap.pollLatencyUs < 500000);
+
+  AuthManager auth(tempRoot / "data", "np_adm_integration_secret_987654");
+  std::string viewerTok;
+  ApiTokenRecord vRec;
+  CHECK(auth.createApiToken("viewer-1", Role::Viewer, 0, viewerTok, vRec));
+
+  AuditLog audit(tempRoot / "data" / "audit.tsv");
+  RateLimiter authLimiter(10, 60000, 60000);
+  GeoDnsService geoDns(tempRoot / "data" / "geo.tsv");
+  ServiceMonitor svcMon(tempRoot / "data" / "svc.tsv");
+  TracerouteService tracer(geoDns);
+  SettingsStore settings(tempRoot / "data" / "settings.tsv");
+  HistoryStore history(tempRoot / "data");
+  UpdateManager updater("1.3.0", nullptr);
+
+  std::string snapJson = serializeSnapshotJson(snap, geoDns, 1000, 0, &svcMon);
+  ApiRouter router(ApiDependencies{
+      auth, audit, authLimiter, svcMon, tracer, settings, history, updater,
+      tempRoot / "data", false, false,
+      [&]() { return snapJson; },
+      nullptr, nullptr,
+  });
+
   WsServer server(0, tempRoot / "static", tempRoot / "assets");
-  server.setLatestSnapshotJson(serializeSnapshotJson(snap, geoDns, 300, 0));
-  server.setHealthCallback([]() { return std::string("{\"status\":\"ok\"}"); });
+  server.setLatestSnapshotJson(snapJson);
+  server.setHealthCallback([]() { return std::string("{\"status\":\"ok\",\"authRequired\":true}"); });
+  server.setWsAuthCallback([&](const HttpRequest& r) { return router.handleWsAuth(r); });
+  server.setApiCallback([&](const HttpRequest& r) { return router.handleHttp(r); });
   CHECK(server.start());
-  CHECK(server.port() > 0);
+  const uint16_t port = server.port();
+  const std::string hostHdr = "127.0.0.1:" + std::to_string(port);
 
-  // Connect via TCP and perform HTTP GET /api/health
-  SOCKET c = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  CHECK(c != INVALID_SOCKET);
-  sockaddr_in addr{};
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(server.port());
-  inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
-  CHECK(connect(c, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == 0);
+  // 1. Public health check works and has no wildcard CORS
+  std::string healthResp = sendRawHttp(port, "GET /api/health HTTP/1.1\r\nHost: " + hostHdr + "\r\n\r\n");
+  CHECK(healthResp.find("200 OK") != std::string::npos);
+  CHECK(healthResp.find("Access-Control-Allow-Origin: *") == std::string::npos);
+  CHECK(healthResp.find("X-Content-Type-Options: nosniff") != std::string::npos);
 
-  const std::string httpReq = "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
-  send(c, httpReq.data(), static_cast<int>(httpReq.size()), 0);
-  char buf[1024] = {};
-  int n = recv(c, buf, sizeof(buf) - 1, 0);
-  CHECK(n > 0);
-  std::string httpResp(buf, static_cast<size_t>(n));
-  CHECK(httpResp.find("200 OK") != std::string::npos);
-  CHECK(httpResp.find("{\"status\":\"ok\"}") != std::string::npos);
-  closesocket(c);
+  // 2. Unauthenticated API & destructive calls rejected with 401
+  CHECK(sendRawHttp(port, "GET /api/snapshot HTTP/1.1\r\nHost: " + hostHdr + "\r\n\r\n")
+            .find("401 Unauthorized") != std::string::npos);
+  CHECK(sendRawHttp(port, "POST /api/action/kill-process HTTP/1.1\r\nHost: " + hostHdr + "\r\nContent-Length: 2\r\n\r\n{}")
+            .find("401 Unauthorized") != std::string::npos);
 
-  // Connect via WebSocket handshake and receive initial snapshot frame
+  // 3. Path traversal blocked
+  CHECK(sendRawHttp(port, "GET /%2e%2e/data/audit.tsv HTTP/1.1\r\nHost: " + hostHdr + "\r\n\r\n")
+            .find("403 Forbidden") != std::string::npos);
+
+  // 4. Cross-origin & DNS rebinding Host rejected
+  CHECK(sendRawHttp(port, "GET /api/health HTTP/1.1\r\nHost: evil.attacker.local\r\n\r\n")
+            .find("403 Forbidden") != std::string::npos);
+  CHECK(sendRawHttp(port, "POST /api/auth/login HTTP/1.1\r\nHost: " + hostHdr +
+                              "\r\nOrigin: https://evil.example\r\nContent-Length: 2\r\n\r\n{}")
+            .find("403 Forbidden") != std::string::npos);
+
+  // 5. Login as Viewer -> Cookie + CSRF token
+  std::string loginBody = "{\"token\":\"" + viewerTok + "\"}";
+  std::string loginResp = sendRawHttp(
+      port,
+      "POST /api/auth/login HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nContent-Type: application/json\r\nContent-Length: " +
+          std::to_string(loginBody.size()) + "\r\n\r\n" + loginBody);
+  CHECK(loginResp.find("200 OK") != std::string::npos);
+  std::string viewerCookie = extractCookieSession(loginResp);
+  CHECK(!viewerCookie.empty());
+  JsonValue loginJson;
+  std::string jerr;
+  CHECK(JsonValue::parse(extractJsonBody(loginResp), loginJson, jerr));
+  std::string viewerCsrf = loginJson.getString("csrfToken");
+  CHECK(!viewerCsrf.empty());
+
+  // 6. Viewer can read snapshot, but CANNOT add service (403 RBAC)
+  CHECK(sendRawHttp(port, "GET /api/snapshot HTTP/1.1\r\nHost: " + hostHdr +
+                              "\r\nCookie: np_session=" + viewerCookie + "\r\n\r\n")
+            .find("200 OK") != std::string::npos);
+
+  std::string addSvc = R"({"name":"Test","host":"1.1.1.1","port":443})";
+  CHECK(sendRawHttp(port, "POST /api/services/add HTTP/1.1\r\nHost: " + hostHdr +
+                              "\r\nCookie: np_session=" + viewerCookie +
+                              "\r\nX-CSRF-Token: " + viewerCsrf +
+                              "\r\nContent-Length: " + std::to_string(addSvc.size()) + "\r\n\r\n" + addSvc)
+            .find("403 Forbidden") != std::string::npos);
+
+  // 7. Cookie-based Admin request WITHOUT CSRF header -> 403
+  std::string admLoginBody = R"({"token":"np_adm_integration_secret_987654"})";
+  std::string admLoginResp = sendRawHttp(
+      port,
+      "POST /api/auth/login HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nContent-Length: " + std::to_string(admLoginBody.size()) + "\r\n\r\n" + admLoginBody);
+  CHECK(admLoginResp.find("200 OK") != std::string::npos);
+  std::string admCookie = extractCookieSession(admLoginResp);
+  JsonValue admJson;
+  CHECK(JsonValue::parse(extractJsonBody(admLoginResp), admJson, jerr));
+  std::string admCsrf = admJson.getString("csrfToken");
+
+  std::string killNoConfirm = R"({"pid":4,"proc":"System"})";
+  CHECK(sendRawHttp(port, "POST /api/action/kill-process HTTP/1.1\r\nHost: " + hostHdr +
+                              "\r\nCookie: np_session=" + admCookie +
+                              "\r\nContent-Length: " + std::to_string(killNoConfirm.size()) + "\r\n\r\n" + killNoConfirm)
+            .find("403 Forbidden") != std::string::npos);
+
+  // 8. Admin destructive call WITHOUT confirm:true -> 400 confirmation_required
+  CHECK(sendRawHttp(port, "POST /api/action/kill-process HTTP/1.1\r\nHost: " + hostHdr +
+                              "\r\nCookie: np_session=" + admCookie +
+                              "\r\nX-CSRF-Token: " + admCsrf +
+                              "\r\nContent-Length: " + std::to_string(killNoConfirm.size()) + "\r\n\r\n" + killNoConfirm)
+            .find("confirmation_required") != std::string::npos);
+
+  // 9. Admin killing protected PID 4 WITH confirm:true -> 400 protected + audited
+  std::string killConfirm = R"({"pid":4,"proc":"System","confirm":true})";
+  CHECK(sendRawHttp(port, "POST /api/action/kill-process HTTP/1.1\r\nHost: " + hostHdr +
+                              "\r\nCookie: np_session=" + admCookie +
+                              "\r\nX-CSRF-Token: " + admCsrf +
+                              "\r\nContent-Length: " + std::to_string(killConfirm.size()) + "\r\n\r\n" + killConfirm)
+            .find("terminate_failed") != std::string::npos);
+
+  std::string auditResp = sendRawHttp(port, "GET /api/v1/security/audit HTTP/1.1\r\nHost: " + hostHdr +
+                                                "\r\nAuthorization: Bearer np_adm_integration_secret_987654\r\n\r\n");
+  CHECK(auditResp.find("200 OK") != std::string::npos);
+  CHECK(auditResp.find("process.terminate") != std::string::npos);
+
+  // 10. Unauthenticated WebSocket rejected with 401
+  std::string unauthWs = sendRawHttp(
+      port,
+      "GET /ws HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n");
+  CHECK(unauthWs.find("401 Unauthorized") != std::string::npos);
+
+  // 11. Authenticated WebSocket via single-use ticket -> 101 + snapshot frame
+  std::string ticketResp = sendRawHttp(
+      port,
+      "POST /api/auth/ws-ticket HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nCookie: np_session=" + viewerCookie +
+          "\r\nX-CSRF-Token: " + viewerCsrf + "\r\nContent-Length: 0\r\n\r\n");
+  JsonValue ticketJson;
+  CHECK(JsonValue::parse(extractJsonBody(ticketResp), ticketJson, jerr));
+  std::string ticket = ticketJson.getString("ticket");
+  CHECK(!ticket.empty());
+
   SOCKET ws = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   CHECK(ws != INVALID_SOCKET);
+  sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(port);
+  inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
   CHECK(connect(ws, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr)) == 0);
   const std::string wsReq =
-      "GET /ws HTTP/1.1\r\n"
-      "Host: 127.0.0.1\r\n"
+      "GET /ws?ticket=" + ticket + " HTTP/1.1\r\n"
+      "Host: " + hostHdr + "\r\n"
+      "Origin: http://" + hostHdr + "\r\n"
       "Upgrade: websocket\r\n"
       "Connection: Upgrade\r\n"
       "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
       "Sec-WebSocket-Version: 13\r\n\r\n";
   send(ws, wsReq.data(), static_cast<int>(wsReq.size()), 0);
-
   std::string wsResp;
   char wbuf[4096];
   for (int attempt = 0; attempt < 10; ++attempt) {
@@ -186,15 +481,37 @@ int testLiveMonitorAndWsLoopback() {
     }
   }
   CHECK(wsResp.find("101 Switching Protocols") != std::string::npos);
-  CHECK(wsResp.find("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=") != std::string::npos);
   size_t hdrEnd = wsResp.find("\r\n\r\n") + 4;
   CHECK(wsResp.size() > hdrEnd + 2);
-  CHECK(static_cast<uint8_t>(wsResp[hdrEnd]) == 0x81); // initial snapshot text frame
+  CHECK(static_cast<uint8_t>(wsResp[hdrEnd]) == 0x81);
   closesocket(ws);
 
   server.stop();
   std::filesystem::remove_all(tempRoot, ec);
-  std::cout << "[PASS] testLiveMonitorAndWsLoopback (poll=" << snap.pollLatencyUs << " us, conns=" << snap.totalConnections << ")\n";
+  std::cout << "[PASS] testLiveSecurityHttpAndWsIntegration\n";
+  return 0;
+}
+
+int testTlsContextInit() {
+  auto dir = std::filesystem::temp_directory_path() / "netpulse_tls_test";
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+
+  TlsContext tls;
+  TlsConfig cfg;
+  cfg.enabled = true;
+  cfg.autoCertDir = dir;
+  cfg.commonName = "localhost";
+  std::string err;
+  bool ok = tls.init(cfg, err);
+  if (!ok) {
+    std::cerr << "TLS init failed: " << err << "\n";
+  }
+  CHECK(ok);
+  CHECK(tls.isReady());
+
+  std::filesystem::remove_all(dir, ec);
+  std::cout << "[PASS] testTlsContextInit\n";
   return 0;
 }
 
@@ -234,7 +551,6 @@ int testSemVerAndReleaseParsing() {
     std::ofstream out(tmpFile, std::ios::binary | std::ios::trunc);
     out << "abc";
   }
-  // SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
   CHECK(computeFileSha256Hex(tmpFile) ==
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
   std::error_code ec;
@@ -262,7 +578,7 @@ int testServiceMonitorParsing() {
   {
     ServiceMonitor mon(tempSvc);
     auto snap = mon.getSnapshot();
-    CHECK(snap.size() >= 17); // 6 continents + 11 global services
+    CHECK(snap.size() >= 17);
     CHECK(mon.addCustomService("Local Echo", "127.0.0.1", 80, "SA", -23.5, -46.6));
     auto snap2 = mon.getSnapshot();
     CHECK(snap2.size() == snap.size() + 1);
@@ -276,7 +592,6 @@ int testServiceMonitorParsing() {
 }
 
 int testMmdbAndHistorySecurity() {
-  // Build a minimal valid MaxMind DB (.mmdb) v2.0 file (IPv4, 24-bit record, 1 node: 0.0.0.0/1 -> record 16)
   auto encStr = [](std::vector<uint8_t>& buf, const std::string& s) {
     buf.push_back(static_cast<uint8_t>((2 << 5) | s.size()));
     buf.insert(buf.end(), s.begin(), s.end());
@@ -298,16 +613,10 @@ int testMmdbAndHistorySecurity() {
     for (int sh = 56; sh >= 0; sh -= 8) buf.push_back(static_cast<uint8_t>((raw >> sh) & 0xFF));
   };
 
-  // Search tree: 1 node (6 bytes for 24-bit left/right records).
-  // Bit 0 = 0 (IPs 0.0.0.0..127.255.255.255) -> value node_count + 16 = 17 -> offset 0 in data section!
-  // Bit 1 = 1 -> node_count = 1 (not found)
   std::vector<uint8_t> mmdb;
-  // Left record = 17 (0x000011), Right record = 1 (0x000001)
   mmdb.insert(mmdb.end(), {0x00, 0x00, 0x11, 0x00, 0x00, 0x01});
-  // 16-byte separator
   mmdb.insert(mmdb.end(), 16, 0x00);
 
-  // Data section at offset 0: Map{ "country": Map{"iso_code":"US"}, "location": Map{"latitude":39.03,"longitude":-77.5} }
   mmdb.push_back((7 << 5) | 2);
   encStr(mmdb, "country");
   mmdb.push_back((7 << 5) | 1);
@@ -320,7 +629,6 @@ int testMmdbAndHistorySecurity() {
   encStr(mmdb, "longitude");
   encDouble(mmdb, -77.5);
 
-  // Metadata marker + Map{ "node_count":1, "record_size":24, "ip_version":4, "database_type":"GeoLite2-City" }
   const uint8_t marker[] = {0xAB, 0xCD, 0xEF, 'M', 'a', 'x', 'M', 'i', 'n', 'd', '.', 'c', 'o', 'm'};
   mmdb.insert(mmdb.end(), std::begin(marker), std::end(marker));
   mmdb.push_back((7 << 5) | 4);
@@ -347,7 +655,6 @@ int testMmdbAndHistorySecurity() {
   std::error_code ec;
   std::filesystem::remove(mmdbPath, ec);
 
-  // Security & History checks
   CHECK(isSensitivePort(22));
   CHECK(isSensitivePort(3389));
   CHECK(!isSensitivePort(443));
@@ -434,20 +741,28 @@ int testSettingsStorePersistence() {
 }
 
 int main() {
+#ifdef _WIN32
   WSADATA wsa{};
   if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
+#endif
 
   int rc = 0;
   rc |= testIpClassification();
   rc |= testGeoJsonAndCache();
   rc |= testWebSocketRfc6455();
-  rc |= testLiveMonitorAndWsLoopback();
+  rc |= testJsonLiteParser();
+  rc |= testAuthManagerAndRbac();
+  rc |= testRateLimiterAndAuditLog();
+  rc |= testLiveSecurityHttpAndWsIntegration();
+  rc |= testTlsContextInit();
   rc |= testSemVerAndReleaseParsing();
   rc |= testServiceMonitorParsing();
   rc |= testMmdbAndHistorySecurity();
   rc |= testSettingsStorePersistence();
 
+#ifdef _WIN32
   WSACleanup();
+#endif
   if (rc == 0) {
     std::cout << "ALL C++ TESTS PASSED.\n";
   }

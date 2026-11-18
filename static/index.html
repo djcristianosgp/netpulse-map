@@ -71,6 +71,7 @@
       </select>
       <button class="ctrl-btn" id="btnPause" title="Pausar/Retomar stream (Espaço)">Pausar</button>
       <button class="ctrl-btn" id="btnReset" title="Mostrar planeta inteiro (R)">Planeta</button>
+      <button class="ctrl-btn" id="btnSecurity" title="Segurança, Tokens & Auditoria">🛡 <span id="authRoleBadge">...</span></button>
       <button class="ctrl-btn" id="btnSettings" title="Configurações da aplicação">⚙</button>
       <button class="ctrl-btn" id="btnMinimizeTray" title="Minimizar para a bandeja do sistema">🗕</button>
     </div>
@@ -245,6 +246,85 @@
           <button type="submit" class="update-apply-btn" style="padding:7px 14px;font-size:12px">Salvar Configurações</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- Auth Login Modal -->
+  <div id="authModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+    <div class="modal-card glass">
+      <div class="modal-head">
+        <div>
+          <div class="insp-eyebrow">ACESSO PROTEGIDO</div>
+          <h2 class="insp-title" id="authTitle">Autenticação NetPulse</h2>
+        </div>
+      </div>
+      <form id="authForm" class="modal-body">
+        <div class="setting-desc" style="font-size:12px;line-height:1.45">
+          Informe seu token de acesso (<code>Viewer</code>, <code>Operator</code> ou <code>Administrator</code>).
+          <span id="authBootstrapHint" class="hidden"><br/>Em execução local, o token inicial de administrador está em <code>data/initial_admin_token.txt</code>.</span>
+        </div>
+        <div class="search-wrap">
+          <input id="authTokenInput" type="password" placeholder="Cole seu token (ex: np_adm_...)" autocomplete="current-password" required />
+        </div>
+        <div id="authFeedback" class="item-geo hidden"></div>
+        <div class="modal-foot">
+          <button type="submit" class="update-apply-btn" style="padding:7px 16px;font-size:12px">Entrar</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Security, RBAC Tokens & Audit Modal -->
+  <div id="securityModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="secTitle">
+    <div class="modal-card modal-card-wide glass">
+      <div class="modal-head">
+        <div>
+          <div class="insp-eyebrow">SEGURANÇA · RBAC &amp; AUDITORIA</div>
+          <h2 class="insp-title" id="secTitle">Central de Segurança</h2>
+        </div>
+        <button class="close-btn" id="btnCloseSecurity" title="Fechar (Esc)">✕</button>
+      </div>
+      <div class="modal-body" style="max-height:76vh;overflow-y:auto">
+        <div class="bw-banner">
+          <span id="secSessionSummary">Sessão ativa</span>
+          <div style="display:flex;gap:6px">
+            <button type="button" class="ctrl-btn" id="btnRevokeAllSessions" style="height:26px;font-size:11px">Revogar Sessões</button>
+            <button type="button" class="ctrl-btn" id="btnLogoutSession" style="height:26px;font-size:11px">Sair</button>
+          </div>
+        </div>
+
+        <div id="secTokensSection" class="notify-group hidden">
+          <div class="notify-cats-head" style="border-top:none;padding-top:0">
+            <span>Tokens de Acesso (RBAC)</span>
+          </div>
+          <form id="createTokenForm" class="add-svc-row">
+            <input id="tokLabelInput" type="text" placeholder="Rótulo (ex: Monitor TV)" maxlength="64" required style="height:30px;border-radius:7px;border:1px solid rgba(148,163,184,0.22);background:rgba(15,23,42,0.8);color:var(--text-main);padding:0 8px;font-size:12px" />
+            <select id="tokRoleSelect" class="ctrl-select" style="height:30px">
+              <option value="viewer">Viewer (Leitura)</option>
+              <option value="operator">Operator</option>
+              <option value="administrator">Administrator</option>
+            </select>
+            <button type="submit" class="ctrl-btn active" style="height:30px">Gerar</button>
+          </form>
+          <div id="newTokenBanner" class="active-banner hidden" style="user-select:text"></div>
+          <div id="secTokensList" class="sec-list"></div>
+        </div>
+
+        <div class="notify-group">
+          <div class="notify-cats-head" style="border-top:none;padding-top:0">
+            <span>Bloqueios de Firewall Ativos</span>
+          </div>
+          <div id="secBlocksList" class="sec-list"></div>
+        </div>
+
+        <div class="notify-group">
+          <div class="notify-cats-head" style="border-top:none;padding-top:0">
+            <span>Log de Auditoria Operacional</span>
+            <button type="button" class="mini-pill-btn" id="btnRefreshAudit">↻ Atualizar</button>
+          </div>
+          <div id="secAuditList" class="sec-list"></div>
+        </div>
+      </div>
     </div>
   </div>
 

@@ -16,9 +16,14 @@
 #endif
 
 #include "actions.hpp"
+#include "api/api_router.hpp"
 #include "geo_dns.hpp"
 #include "history_store.hpp"
 #include "net_monitor.hpp"
+#include "security/audit_log.hpp"
+#include "security/auth_manager.hpp"
+#include "security/rate_limiter.hpp"
+#include "security/tls_context.hpp"
 #include "serializer.hpp"
 #include "service_monitor.hpp"
 #include "settings_store.hpp"
@@ -34,6 +39,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -60,6 +66,28 @@ void posixSignalHandler(int) {
   gRunning.store(false);
 }
 #endif
+
+std::string getEnvString(const char* name) {
+#ifdef _WIN32
+  char* buf = nullptr;
+  size_t len = 0;
+  if (_dupenv_s(&buf, &len, name) == 0 && buf) {
+    std::string out(buf);
+    free(buf);
+    return out;
+  }
+  return {};
+#else
+  if (const char* v = std::getenv(name)) {
+    return std::string(v);
+  }
+  return {};
+#endif
+}
+
+bool isLoopbackBindHost(const std::string& host) {
+  return host == "127.0.0.1" || host == "::1" || host == "localhost";
+}
 
 uint64_t nowMs() {
   return static_cast<uint64_t>(
@@ -98,7 +126,6 @@ std::filesystem::path resolveDataDir(const std::filesystem::path& rootDir) {
   if (std::filesystem::exists(rootDir / "src", ec)) {
     return localData;
   }
-  // When installed under Program Files or read-only directory, store runtime cache in %LOCALAPPDATA%.
   std::filesystem::create_directories(localData, ec);
   if (!ec) {
     const auto probe = localData / ".write_probe";
@@ -153,27 +180,14 @@ void launchAppWindow(const std::string& url, bool useAppMode) {
 #endif
 }
 
-std::string extractSimpleJsonField(const std::string& body, const std::string& key) {
-  const std::string needle = "\"" + key + "\"";
-  size_t pos = body.find(needle);
-  if (pos == std::string::npos) return {};
-  pos = body.find(':', pos + needle.size());
-  if (pos == std::string::npos) return {};
-  ++pos;
-  while (pos < body.size() && (body[pos] == ' ' || body[pos] == '\t')) ++pos;
-  if (pos >= body.size()) return {};
-  if (body[pos] == '"') {
-    ++pos;
-    std::string out;
-    while (pos < body.size() && body[pos] != '"') {
-      if (body[pos] == '\\' && pos + 1 < body.size()) ++pos;
-      out.push_back(body[pos++]);
-    }
-    return out;
+std::vector<std::string> splitCommaList(const std::string& raw) {
+  std::vector<std::string> out;
+  std::istringstream ss(raw);
+  std::string item;
+  while (std::getline(ss, item, ',')) {
+    if (!item.empty()) out.push_back(item);
   }
-  size_t end = pos;
-  while (end < body.size() && body[end] != ',' && body[end] != '}' && body[end] != ' ') ++end;
-  return body.substr(pos, end - pos);
+  return out;
 }
 
 } // namespace
@@ -189,12 +203,21 @@ int main(int argc, char** argv) {
 #endif
   bool useAppMode = true;
   bool waitSlot = false;
+  bool allowRemote = (getEnvString("NETPULSE_ALLOW_REMOTE") == "1" ||
+                      getEnvString("NETPULSE_ALLOW_REMOTE") == "true");
+  bool forceTls = (getEnvString("NETPULSE_TLS") == "1");
+  bool behindTlsProxy = (getEnvString("NETPULSE_BEHIND_TLS_PROXY") == "1");
+  bool insecureHttp = (getEnvString("NETPULSE_INSECURE_HTTP") == "1");
+  std::string tlsCertPath = getEnvString("NETPULSE_TLS_CERT");
+  std::string tlsKeyPath = getEnvString("NETPULSE_TLS_KEY");
+  std::string allowedHostsRaw = getEnvString("NETPULSE_ALLOWED_HOSTS");
+  std::string envAdminToken = getEnvString("NETPULSE_ADMIN_TOKEN");
 
-  if (const char* envHost = std::getenv("NETPULSE_HOST")) {
-    if (*envHost) bindHost = envHost;
+  if (const std::string envHost = getEnvString("NETPULSE_HOST"); !envHost.empty()) {
+    bindHost = envHost;
   }
-  if (const char* envPort = std::getenv("NETPULSE_PORT")) {
-    if (*envPort) port = static_cast<uint16_t>(std::clamp(std::atoi(envPort), 1024, 65535));
+  if (const std::string envPort = getEnvString("NETPULSE_PORT"); !envPort.empty()) {
+    port = static_cast<uint16_t>(std::clamp(std::atoi(envPort.c_str()), 1024, 65535));
   }
 
   for (int i = 1; i < argc; ++i) {
@@ -211,7 +234,30 @@ int main(int argc, char** argv) {
       useAppMode = false;
     } else if (arg == "--wait-slot") {
       waitSlot = true;
+    } else if (arg == "--allow-remote") {
+      allowRemote = true;
+    } else if (arg == "--tls") {
+      forceTls = true;
+    } else if (arg == "--tls-cert" && i + 1 < argc) {
+      tlsCertPath = argv[++i];
+      forceTls = true;
+    } else if (arg == "--tls-key" && i + 1 < argc) {
+      tlsKeyPath = argv[++i];
+      forceTls = true;
+    } else if (arg == "--behind-tls-proxy") {
+      behindTlsProxy = true;
+    } else if (arg == "--insecure-http") {
+      insecureHttp = true;
+    } else if (arg == "--allowed-hosts" && i + 1 < argc) {
+      allowedHostsRaw = argv[++i];
     }
+  }
+
+  const bool isRemoteBind = !isLoopbackBindHost(bindHost);
+  if (isRemoteBind && !allowRemote) {
+    std::cerr << "[SECURITY] Recusando bind remoto em '" << bindHost
+              << "' sem --allow-remote ou NETPULSE_ALLOW_REMOTE=1.\n";
+    return 2;
   }
 
 #ifdef _WIN32
@@ -221,7 +267,7 @@ int main(int argc, char** argv) {
   }
 #endif
 
-  const bool trayMode = (openBrowser || waitSlot) && (port == 8740);
+  const bool trayMode = (openBrowser || waitSlot) && (port == 8740) && !isRemoteBind;
   void* instanceMutex = nullptr;
   if (trayMode) {
     int attempts = waitSlot ? 25 : 1;
@@ -253,6 +299,31 @@ int main(int argc, char** argv) {
   const std::filesystem::path staticDir = rootDir / "static";
   const std::filesystem::path assetsDir = rootDir / "assets";
   const std::filesystem::path dataDir = resolveDataDir(rootDir);
+
+  netpulse::AuthManager auth(dataDir, envAdminToken);
+  netpulse::AuditLog audit(dataDir / "security_audit.tsv");
+  netpulse::RateLimiter apiLimiter(240, 10000);
+  netpulse::RateLimiter authLimiter(10, 60000, 60000);
+
+  const bool enableTls = forceTls || (isRemoteBind && !behindTlsProxy && !insecureHttp);
+  netpulse::TlsContext tlsCtx;
+  if (enableTls) {
+    netpulse::TlsConfig tlsCfg;
+    tlsCfg.enabled = true;
+    tlsCfg.certPath = tlsCertPath;
+    tlsCfg.keyPath = tlsKeyPath;
+    tlsCfg.autoCertDir = dataDir / "tls";
+    tlsCfg.commonName = isRemoteBind ? bindHost : "localhost";
+    std::string tlsErr;
+    if (!tlsCtx.init(tlsCfg, tlsErr)) {
+      std::cerr << "[SECURITY] Falha ao inicializar TLS: " << tlsErr << "\n";
+      netpulse::releaseSingleInstance(instanceMutex);
+#ifdef _WIN32
+      WSACleanup();
+#endif
+      return 3;
+    }
+  }
 
   netpulse::GeoDnsService geoDns(dataDir / "geoip_cache.tsv");
   geoDns.tryLoadMmdbFromDir(dataDir);
@@ -290,6 +361,45 @@ int main(int argc, char** argv) {
 
   netpulse::NetMonitor monitor;
   netpulse::WsServer server(port, staticDir, assetsDir, bindHost);
+  if (tlsCtx.isReady()) {
+    server.setTlsContext(&tlsCtx);
+  }
+  server.setTrustProxyTls(behindTlsProxy);
+  if (!allowedHostsRaw.empty()) {
+    server.setAllowedHosts(splitCommaList(allowedHostsRaw));
+  }
+
+  std::mutex latestSnapCopyMutex;
+  std::string latestSnapCopy;
+
+  netpulse::ApiRouter apiRouter(netpulse::ApiDependencies{
+      auth,
+      audit,
+      authLimiter,
+      serviceMon,
+      tracer,
+      settingsStore,
+      history,
+      updater,
+      dataDir,
+      isRemoteBind,
+      tlsCtx.isReady() || behindTlsProxy,
+      [&]() {
+        std::lock_guard lock(latestSnapCopyMutex);
+        return latestSnapCopy;
+      },
+      [&](const netpulse::AppSettings& nextCfg) {
+        syncHistoryNotifications(nextCfg);
+        netpulse::setMinimizeToTrayEnabled(nextCfg.minimizeToTray);
+      },
+      []() {
+        std::thread([]() {
+          std::this_thread::sleep_for(std::chrono::milliseconds(250));
+          gRunning.store(false);
+          netpulse::requestTrayQuit();
+        }).detach();
+      },
+  });
 
   const uint64_t startMs = nowMs();
   std::atomic<uint64_t> lastPollUs{0};
@@ -302,161 +412,35 @@ int main(int argc, char** argv) {
     const char* engineName = "C++20 Native Linux";
 #endif
     return std::string("{\"status\":\"ok\",\"version\":\"") + netpulse::kAppVersion +
-           "\",\"engine\":\"" + engineName + "\",\"elevated\":" +
-           (netpulse::isProcessElevated() ? "true" : "false") +
-           ",\"mmdb\":" + (geoDns.hasOfflineMmdb() ? "true" : "false") +
+           "\",\"engine\":\"" + engineName + "\",\"authRequired\":true,\"tls\":" +
+           (tlsCtx.isReady() ? "true" : "false") +
+           ",\"remoteAccess\":" + (isRemoteBind ? "true" : "false") +
            ",\"uptimeMs\":" + std::to_string(uptime) +
            ",\"pollUs\":" + std::to_string(lastPollUs.load()) +
-           ",\"geoCached\":" + std::to_string(geoDns.cachedGeoCount()) +
-           ",\"dnsCached\":" + std::to_string(geoDns.cachedDnsCount()) +
            ",\"wsClients\":" + std::to_string(server.clientCount()) + "}";
   });
 
-  server.setApiCallback([&](const std::string& method,
-                            const std::string& path,
-                            const std::string& body) -> std::pair<int, std::string> {
-    if (path == "/api/update/status" && method == "GET") {
-      return {200, updater.getStatusJson()};
-    }
-    if (path == "/api/update/check" && method == "POST") {
-      updater.checkNowAsync();
-      return {202, updater.getStatusJson()};
-    }
-    if (path == "/api/update/apply" && method == "POST") {
-      bool started = updater.startInstallAsync();
-      return {started ? 202 : 409, updater.getStatusJson()};
-    }
-    if (path == "/api/services" && method == "GET") {
-      return {200, serviceMon.getServicesJson()};
-    }
-    if (path == "/api/services/probe" && method == "POST") {
-      serviceMon.probeNowAsync();
-      return {202, serviceMon.getServicesJson()};
-    }
-    if (path == "/api/services/add" && method == "POST") {
-      std::string name = extractSimpleJsonField(body, "name");
-      std::string host = extractSimpleJsonField(body, "host");
-      int portNum = std::atoi(extractSimpleJsonField(body, "port").c_str());
-      if (portNum <= 0 || portNum > 65535) portNum = 443;
-      std::string cont = extractSimpleJsonField(body, "continent");
-      double lat = std::strtod(extractSimpleJsonField(body, "lat").c_str(), nullptr);
-      double lon = std::strtod(extractSimpleJsonField(body, "lon").c_str(), nullptr);
-      if (!serviceMon.addCustomService(name, host, static_cast<uint16_t>(portNum), cont, lat, lon)) {
-        return {400, "{\"error\":\"invalid_service\"}"};
-      }
-      return {201, serviceMon.getServicesJson()};
-    }
-    if (path == "/api/services/remove" && method == "POST") {
-      std::string id = extractSimpleJsonField(body, "id");
-      if (!serviceMon.removeCustomService(id)) {
-        return {404, "{\"error\":\"not_found\"}"};
-      }
-      return {200, serviceMon.getServicesJson()};
-    }
-    if (path == "/api/trace/start" && method == "POST") {
-      std::string ip = extractSimpleJsonField(body, "ip");
-      if (!tracer.startTrace(ip)) {
-        return {400, "{\"error\":\"invalid_ip\"}"};
-      }
-      return {202, tracer.getStatusJson()};
-    }
-    if (path == "/api/trace/status" && method == "GET") {
-      return {200, tracer.getStatusJson()};
-    }
-    if (path == "/api/history/events" && method == "GET") {
-      return {200, history.getEventsJson(150)};
-    }
-    if (path == "/api/history/service" && method == "POST") {
-      std::string id = extractSimpleJsonField(body, "id");
-      return {200, history.getServiceHistoryJson(id, 60)};
-    }
-    if (path == "/api/alerts/toggle" && method == "POST") {
-      std::string en = extractSimpleJsonField(body, "enabled");
-      bool next = (en == "true" || en == "1");
-      history.setAlertsEnabled(next);
-      auto cfg = settingsStore.get();
-      cfg.alertsEnabled = next;
-      std::string err;
-      settingsStore.update(cfg, err);
-      return {200, std::string("{\"alertsEnabled\":") + (next ? "true" : "false") + "}"};
-    }
-    if (path == "/api/settings" && method == "GET") {
-      return {200, settingsStore.toJson()};
-    }
-    if (path == "/api/settings" && method == "POST") {
-      auto nextCfg = settingsStore.get();
-      auto parseBool = [](const std::string& val, bool fallback) {
-        if (val.empty()) return fallback;
-        return (val == "true" || val == "1");
-      };
-      nextCfg.alertsEnabled = parseBool(extractSimpleJsonField(body, "alertsEnabled"), nextCfg.alertsEnabled);
-      nextCfg.notifyServiceDown = parseBool(extractSimpleJsonField(body, "notifyServiceDown"), nextCfg.notifyServiceDown);
-      nextCfg.notifyServiceDegraded = parseBool(extractSimpleJsonField(body, "notifyServiceDegraded"), nextCfg.notifyServiceDegraded);
-      nextCfg.notifySensitivePort = parseBool(extractSimpleJsonField(body, "notifySensitivePort"), nextCfg.notifySensitivePort);
-      nextCfg.notifyNewCountry = parseBool(extractSimpleJsonField(body, "notifyNewCountry"), nextCfg.notifyNewCountry);
-      nextCfg.autoStart = parseBool(extractSimpleJsonField(body, "autoStart"), nextCfg.autoStart);
-      std::string sView = extractSimpleJsonField(body, "defaultView");
-      if (sView == "local" || sView == "global") nextCfg.defaultView = sView;
-      nextCfg.minimizeToTray = parseBool(extractSimpleJsonField(body, "minimizeToTray"), nextCfg.minimizeToTray);
-
-      std::string err;
-      if (!settingsStore.update(nextCfg, err)) {
-        std::string resp = "{\"ok\":false,\"error\":";
-        netpulse::appendJsonEscaped(resp, err);
-        resp.push_back('}');
-        return {400, resp};
-      }
-      syncHistoryNotifications(nextCfg);
-      netpulse::setMinimizeToTrayEnabled(nextCfg.minimizeToTray);
-      return {200, settingsStore.toJson()};
-    }
-    if (path == "/api/window/minimize-tray" && method == "POST") {
-      bool ok = netpulse::minimizeMapWindowToTray();
-      return {ok ? 200 : 409, std::string("{\"ok\":") + (ok ? "true" : "false") + "}"};
-    }
-    if (path == "/api/action/kill-process" && method == "POST") {
-      uint32_t pid = static_cast<uint32_t>(std::strtoul(extractSimpleJsonField(body, "pid").c_str(), nullptr, 10));
-      std::string proc = extractSimpleJsonField(body, "proc");
-      std::string err;
-      if (!netpulse::terminateTargetProcess(pid, proc, err)) {
-        std::string resp = "{\"ok\":false,\"error\":";
-        netpulse::appendJsonEscaped(resp, err);
-        resp.push_back('}');
-        return {400, resp};
-      }
-      history.recordManualAction("warn", "Processo encerrado", proc + " (PID " + std::to_string(pid) + ")");
-      return {200, "{\"ok\":true}"};
-    }
-    if (path == "/api/action/block-ip" && method == "POST") {
-      std::string ip = extractSimpleJsonField(body, "ip");
-      std::string err;
-      if (!netpulse::blockIpInWindowsFirewall(ip, netpulse::isProcessElevated(), err)) {
-        std::string resp = "{\"ok\":false,\"error\":";
-        netpulse::appendJsonEscaped(resp, err);
-        resp.push_back('}');
-        return {400, resp};
-      }
-      history.recordManualAction("warn", "IP bloqueado no Firewall", ip);
-      return {200, "{\"ok\":true}"};
-    }
-    if (path == "/api/elevate" && method == "POST") {
-      if (netpulse::isProcessElevated()) {
-        return {200, "{\"ok\":true,\"alreadyElevated\":true}"};
-      }
-      if (!netpulse::relaunchAsAdministrator()) {
-        return {400, "{\"ok\":false,\"error\":\"Elevacao UAC cancelada\"}"};
-      }
-      std::thread([]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-        gRunning.store(false);
-        netpulse::requestTrayQuit();
-      }).detach();
-      return {202, "{\"ok\":true,\"restarting\":true}"};
-    }
-    return {404, "{\"error\":\"not_found\"}"};
+  server.setRateLimitCallback([&](const std::string& remoteIp) -> std::pair<bool, uint32_t> {
+    auto dec = apiLimiter.check(remoteIp);
+    return {dec.allowed, dec.retryAfterSec};
   });
 
-  server.setCommandCallback([&](const std::string& cmd) {
+  server.setWsAuthCallback([&](const netpulse::HttpRequest& req) {
+    return apiRouter.handleWsAuth(req);
+  });
+
+  server.setApiCallback([&](const netpulse::HttpRequest& req) {
+    return apiRouter.handleHttp(req);
+  });
+
+  server.setCommandCallback([&](const std::string& cmd,
+                                const netpulse::AuthContext& authCtx,
+                                const std::string& remoteIp) {
+    if (!netpulse::hasRole(authCtx.role, netpulse::Role::Operator)) {
+      audit.record(authCtx.actor, netpulse::roleToString(authCtx.role), remoteIp,
+                   "ws.command", cmd, "denied", "Comando WebSocket requer nivel Operator");
+      return;
+    }
     if (cmd.find("refreshGeo") != std::string::npos) {
       geoDns.requestHostGeoRefresh();
     } else if (auto pos = cmd.find("interval:"); pos != std::string::npos) {
@@ -475,11 +459,17 @@ int main(int argc, char** argv) {
       if (c.scope == netpulse::IpScope::Public) pubs.push_back(c.remoteIp);
     }
     geoDns.enqueueLookups(pubs);
-    server.setLatestSnapshotJson(
-        netpulse::serializeSnapshotJson(snap, geoDns, intervalMs.load(), 0, &serviceMon));
+    std::string initialJson =
+        netpulse::serializeSnapshotJson(snap, geoDns, intervalMs.load(), 0, &serviceMon);
+    {
+      std::lock_guard lock(latestSnapCopyMutex);
+      latestSnapCopy = initialJson;
+    }
+    server.setLatestSnapshotJson(std::move(initialJson));
   }
 
   if (!server.start()) {
+    std::cerr << "[ERROR] Falha ao iniciar servidor em " << bindHost << ":" << port << "\n";
     tracer.stop();
     serviceMon.stop();
     updater.stop();
@@ -491,10 +481,18 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  const std::string url = "http://127.0.0.1:" + std::to_string(server.port());
+  const std::string scheme = tlsCtx.isReady() ? "https" : "http";
+  const std::string baseUrl = scheme + "://127.0.0.1:" + std::to_string(server.port());
+
+  auto makeLaunchUrl = [&]() {
+    if (!isRemoteBind) {
+      return baseUrl + "/?boot=" + auth.issueLocalLaunchNonce();
+    }
+    return baseUrl + "/";
+  };
 
   if (openBrowser) {
-    launchAppWindow(url, useAppMode);
+    launchAppWindow(makeLaunchUrl(), useAppMode);
   }
 
   std::jthread pollThread([&](std::stop_token st) {
@@ -523,6 +521,10 @@ int main(int argc, char** argv) {
       if (clients > 0 || (tickStart - lastIdleSerializeMs) >= 1500) {
         std::string json =
             netpulse::serializeSnapshotJson(snap, geoDns, intervalMs.load(), clients, &serviceMon);
+        {
+          std::lock_guard lock(latestSnapCopyMutex);
+          latestSnapCopy = json;
+        }
         server.setLatestSnapshotJson(json);
         if (clients > 0) {
           server.broadcastText(json);
@@ -540,11 +542,11 @@ int main(int argc, char** argv) {
 
   if (trayMode) {
     netpulse::TrayCallbacks cb;
-    cb.onOpenApp = [url, useAppMode]() { launchAppWindow(url, useAppMode); };
-    cb.onOpenBrowser = [url]() { launchAppWindow(url, false); };
+    cb.onOpenApp = [makeLaunchUrl, useAppMode]() { launchAppWindow(makeLaunchUrl(), useAppMode); };
+    cb.onOpenBrowser = [makeLaunchUrl]() { launchAppWindow(makeLaunchUrl(), false); };
     cb.onCheckUpdates = [&updater]() { updater.checkNowAsync(); };
     cb.onQuit = []() { gRunning.store(false); };
-    netpulse::runTrayMessageLoop(url, gRunning, std::move(cb));
+    netpulse::runTrayMessageLoop(baseUrl, gRunning, std::move(cb));
   } else {
     while (gRunning.load()) {
       std::this_thread::sleep_for(std::chrono::milliseconds(150));

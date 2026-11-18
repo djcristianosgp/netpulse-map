@@ -19,9 +19,15 @@ Ou dê duplo clique em `run.bat` (abre automaticamente em janela dedicada `--app
 
 Opções de linha de comando:
 - `--port 8740`: define a porta local (padrão `8740`)
+- `--host 127.0.0.1`: define o endereço de bind (padrão `127.0.0.1`)
+- `--allow-remote`: obrigatório para binds não-loopback (ou `NETPULSE_ALLOW_REMOTE=1`); ativa TLS automaticamente
+- `--tls` / `--tls-cert` / `--tls-key` / `--behind-tls-proxy`: controle explícito de TLS (SChannel/OpenSSL)
 - `--interval 1000`: intervalo de leitura em milissegundos (`100` a `5000`, padrão `1000`)
 - `--no-browser`: inicia apenas o servidor sem abrir janela
 - `--browser-tab`: abre em aba normal do navegador padrão em vez de janela `--app`
+
+Documentação adicional:
+- [ARCHITECTURE.md](ARCHITECTURE.md) · [ROADMAP.md](ROADMAP.md) · [SECURITY.md](SECURITY.md) · [CHANGELOG.md](CHANGELOG.md)
 
 ### Recompilar (MSVC C++20)
 ```bat

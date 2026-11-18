@@ -14,6 +14,9 @@
 #else
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <sstream>
 #endif
 
@@ -177,18 +180,50 @@ void TracerouteService::runTrace(std::stop_token st, std::string targetIp) {
   session_.running = false;
   session_.completed = true;
 #else
-  std::string cmd = "traceroute -n -q 1 -w 1 -m 28 " + targetIp + " 2>&1";
-  FILE* pipe = popen(cmd.c_str(), "r");
-  if (!pipe) {
+  int pipeFd[2] = {-1, -1};
+  if (pipe(pipeFd) != 0) {
     std::lock_guard lock(mutex_);
     session_.running = false;
     session_.completed = true;
-    session_.error = "Falha ao executar traceroute";
+    session_.error = "Falha ao criar pipe para traceroute";
     return;
   }
+
+  pid_t child = fork();
+  if (child < 0) {
+    close(pipeFd[0]);
+    close(pipeFd[1]);
+    std::lock_guard lock(mutex_);
+    session_.running = false;
+    session_.completed = true;
+    session_.error = "Falha ao iniciar processo traceroute";
+    return;
+  }
+
+  if (child == 0) {
+    close(pipeFd[0]);
+    dup2(pipeFd[1], STDOUT_FILENO);
+    dup2(pipeFd[1], STDERR_FILENO);
+    close(pipeFd[1]);
+    execlp("traceroute", "traceroute", "-n", "-q", "1", "-w", "1", "-m", "28", targetIp.c_str(), nullptr);
+    _exit(127);
+  }
+
+  close(pipeFd[1]);
+  FILE* pipeStream = fdopen(pipeFd[0], "r");
+  if (!pipeStream) {
+    close(pipeFd[0]);
+    waitpid(child, nullptr, 0);
+    std::lock_guard lock(mutex_);
+    session_.running = false;
+    session_.completed = true;
+    session_.error = "Falha ao ler saida do traceroute";
+    return;
+  }
+
   char lineBuf[512];
   int consecutiveTimeouts = 0;
-  while (!st.stop_requested() && fgets(lineBuf, sizeof(lineBuf), pipe) != nullptr) {
+  while (!st.stop_requested() && fgets(lineBuf, sizeof(lineBuf), pipeStream) != nullptr) {
     std::istringstream iss(lineBuf);
     int ttl = 0;
     if (!(iss >> ttl) || ttl <= 0) continue;
@@ -213,7 +248,8 @@ void TracerouteService::runTrace(std::stop_token st, std::string targetIp) {
     }
     if (reachedTarget || (ttl >= 12 && consecutiveTimeouts >= 4)) break;
   }
-  pclose(pipe);
+  fclose(pipeStream);
+  waitpid(child, nullptr, 0);
 
   std::lock_guard lock(mutex_);
   session_.running = false;

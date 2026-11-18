@@ -58,7 +58,110 @@ const state = {
   selectedServiceId: null,
   rxHistory: new Array(60).fill(0),
   txHistory: new Array(60).fill(0),
+  auth: {
+    authenticated: false,
+    role: 'none',
+    actor: '',
+    csrfToken: '',
+    remoteAccess: false,
+    tlsEnabled: false,
+    bootstrapFileAvailable: false,
+  },
 };
+
+function hasRole(required) {
+  const rank = { none: -1, viewer: 0, operator: 1, administrator: 2 };
+  return (rank[state.auth.role] ?? -1) >= (rank[required] ?? 99);
+}
+
+async function apiFetch(url, opts = {}) {
+  const method = (opts.method || 'GET').toUpperCase();
+  const headers = new Headers(opts.headers || {});
+  if (method !== 'GET' && method !== 'HEAD' && state.auth.csrfToken) {
+    headers.set('X-CSRF-Token', state.auth.csrfToken);
+  }
+  const resp = await fetch(url, { ...opts, method, headers, credentials: 'same-origin' });
+  if (resp.status === 401 && !url.startsWith('/api/auth/')) {
+    state.auth.authenticated = false;
+    state.auth.role = 'none';
+    updateAuthUi();
+    showAuthModal();
+  }
+  return resp;
+}
+
+function updateAuthUi() {
+  const badge = $('authRoleBadge');
+  if (badge) {
+    const labelMap = { administrator: 'Admin', operator: 'Operator', viewer: 'Viewer', none: 'Login' };
+    badge.textContent = labelMap[state.auth.role] || 'Login';
+  }
+  const isOp = hasRole('operator');
+  const isAdmin = hasRole('administrator');
+  if ($('btnToggleAddService')) $('btnToggleAddService').classList.toggle('hidden', !isOp);
+  if ($('btnProbeServices')) $('btnProbeServices').disabled = !isOp;
+  if ($('btnApplyUpdate')) $('btnApplyUpdate').disabled = !isAdmin;
+  if ($('btnSettings')) $('btnSettings').disabled = !state.auth.authenticated;
+}
+
+function showAuthModal(errText = '') {
+  const modal = $('authModal');
+  if (!modal) return;
+  $('authBootstrapHint').classList.toggle('hidden', !state.auth.bootstrapFileAvailable);
+  const fb = $('authFeedback');
+  if (errText) {
+    fb.textContent = errText;
+    fb.classList.remove('hidden');
+  } else {
+    fb.classList.add('hidden');
+  }
+  modal.classList.remove('hidden');
+  setTimeout(() => $('authTokenInput')?.focus(), 50);
+}
+
+function hideAuthModal() {
+  $('authModal')?.classList.add('hidden');
+}
+
+async function ensureAuthenticated() {
+  const params = new URLSearchParams(window.location.search);
+  const boot = params.get('boot');
+  if (boot) {
+    try {
+      const resp = await fetch('/api/auth/exchange', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ nonce: boot }),
+      });
+      if (resp.ok) {
+        const d = await resp.json();
+        state.auth.authenticated = true;
+        state.auth.role = d.role || 'administrator';
+        state.auth.actor = d.actor || 'local-desktop';
+        state.auth.csrfToken = d.csrfToken || '';
+        const cleanUrl = window.location.pathname;
+        window.history.replaceState({}, document.title, cleanUrl);
+        updateAuthUi();
+        return true;
+      }
+    } catch {}
+  }
+
+  try {
+    const resp = await fetch('/api/auth/session', { credentials: 'same-origin' });
+    if (resp.ok) {
+      const s = await resp.json();
+      state.auth = { ...state.auth, ...s };
+      updateAuthUi();
+      if (s.authenticated) return true;
+    }
+  } catch {}
+
+  updateAuthUi();
+  showAuthModal();
+  return false;
+}
 
 let ws = null;
 let reconnectTimer = null;
@@ -379,7 +482,7 @@ function renderPanel(filteredConns = getFilteredConnections()) {
     const bannerHtml = `
       <div class="bw-banner">
         <span>${isExact ? 'Modo: <strong>Banda Exata (EStats)</strong>' : 'Modo: <strong>I/O por Processo</strong>'}</span>
-        ${isExact ? '' : '<button class="ctrl-btn" id="btnElevateMode" style="height:24px;font-size:10.5px;padding:0 8px">Ativar Exato (Admin)</button>'}
+        ${isExact || !hasRole('administrator') ? '' : '<button class="ctrl-btn" id="btnElevateMode" style="height:24px;font-size:10.5px;padding:0 8px">Ativar Exato (Admin)</button>'}
       </div>
     `;
 
@@ -413,7 +516,11 @@ function renderPanel(filteredConns = getFilteredConnections()) {
       elevBtn.onclick = async () => {
         if (!confirm('Reiniciar NetPulse 2D como Administrador para habilitar leitura exata de bytes/s por socket (TcpConnectionEstatsData)?')) return;
         try {
-          await fetch('/api/elevate', { method: 'POST' });
+          await apiFetch('/api/elevate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confirm: true }),
+          });
         } catch {}
       };
     }
@@ -565,12 +672,12 @@ function renderGlobalPanel(container, snap) {
       e.stopPropagation();
       const id = btn.getAttribute('data-del-svc');
       try {
-        await fetch('/api/services/remove', {
+        await apiFetch('/api/services/remove', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ id }),
         });
-        const resp = await fetch('/api/services');
+        const resp = await apiFetch('/api/services');
         if (resp.ok && state.snapshot) {
           state.snapshot.services = await resp.json();
           applyAndRender();
@@ -590,7 +697,7 @@ async function renderHistoryPanel(container) {
   lastHistoryFetchMs = now;
 
   try {
-    const resp = await fetch('/api/history/events');
+    const resp = await apiFetch('/api/history/events');
     if (!resp.ok) return;
     const data = await resp.json();
     const events = data.events || [];
@@ -636,7 +743,7 @@ async function renderHistoryPanel(container) {
     const tbtn = $('btnToggleTrayAlerts');
     if (tbtn) {
       tbtn.onclick = async () => {
-        await fetch('/api/alerts/toggle', {
+        await apiFetch('/api/alerts/toggle', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ enabled: !alertsOn }),
@@ -685,11 +792,15 @@ async function startVisualTraceroute(targetIp, hostDiv) {
   }
   hostDiv.innerHTML = `<div class="item-sub">Rastreando saltos ICMP para ${escHtml(targetIp)}...</div>`;
   try {
-    await fetch('/api/trace/start', {
+    const r = await apiFetch('/api/trace/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ip: targetIp }),
     });
+    if (!r.ok) {
+      hostDiv.innerHTML = `<div class="item-sub">Sem permissão ou erro ao iniciar traceroute.</div>`;
+      return;
+    }
   } catch {
     hostDiv.innerHTML = `<div class="item-sub">Erro ao iniciar traceroute.</div>`;
     return;
@@ -697,7 +808,7 @@ async function startVisualTraceroute(targetIp, hostDiv) {
 
   const poll = async () => {
     try {
-      const resp = await fetch('/api/trace/status');
+      const resp = await apiFetch('/api/trace/status');
       if (!resp.ok) return;
       const tr = await resp.json();
       const hops = tr.hops || [];
@@ -782,10 +893,10 @@ function openServiceInspector(s) {
     </div>
     <div class="insp-section-title">Histórico de Latência (RTT)</div>
     <canvas id="svcSparkCanvas" class="svc-spark" width="308" height="56"></canvas>
-    ${s.ip ? `<div class="insp-actions"><button class="action-btn" id="btnTraceSvc">🧭 Rastrear Rota</button></div><div id="inspTraceBox"></div>` : ''}
+    ${s.ip && hasRole('operator') ? `<div class="insp-actions"><button class="action-btn" id="btnTraceSvc">🧭 Rastrear Rota</button></div><div id="inspTraceBox"></div>` : ''}
   `;
 
-  fetch('/api/history/service', {
+  apiFetch('/api/history/service', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id: s.id }),
@@ -826,9 +937,9 @@ function openConnectionInspector(c) {
       ${hasBw ? `<div class="kv-k">Tráfego</div><div class="kv-v">↓ ${formatBytesPerSec(c.rxBps)} · ↑ ${formatBytesPerSec(c.txBps)}</div>` : ''}
     </div>
     <div class="insp-actions">
-      ${c.scope === 'public' ? '<button class="action-btn" id="btnTraceConn">🧭 Rastrear Rota</button>' : ''}
-      ${c.scope === 'public' ? '<button class="action-btn danger" id="btnBlockIp">🛡 Bloquear IP</button>' : ''}
-      ${c.pid > 4 ? '<button class="action-btn danger" id="btnKillProc">⏹ Encerrar PID</button>' : ''}
+      ${c.scope === 'public' && hasRole('operator') ? '<button class="action-btn" id="btnTraceConn">🧭 Rastrear Rota</button>' : ''}
+      ${c.scope === 'public' && hasRole('administrator') ? '<button class="action-btn danger" id="btnBlockIp">🛡 Bloquear IP</button>' : ''}
+      ${c.pid > 4 && hasRole('administrator') ? '<button class="action-btn danger" id="btnKillProc">⏹ Encerrar PID</button>' : ''}
     </div>
     <div id="actionFeedback" class="item-geo hidden"></div>
     <div id="inspTraceBox"></div>
@@ -857,13 +968,13 @@ function openConnectionInspector(c) {
       fb.classList.remove('hidden');
       fb.textContent = 'Aplicando regra no Firewall...';
       try {
-        const r = await fetch('/api/action/block-ip', {
+        const r = await apiFetch('/api/action/block-ip', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ip: c.rip }),
+          body: JSON.stringify({ ip: c.rip, confirm: true }),
         });
         const j = await r.json();
-        fb.textContent = j.ok ? `IP ${c.rip} bloqueado no Firewall.` : `Erro: ${j.error}`;
+        fb.textContent = j.ok ? `IP ${c.rip} bloqueado no Firewall.` : `Erro: ${j.message || j.error}`;
       } catch {
         fb.textContent = 'Falha ao comunicar com o motor.';
       }
@@ -875,13 +986,13 @@ function openConnectionInspector(c) {
       const fb = $('actionFeedback');
       fb.classList.remove('hidden');
       try {
-        const r = await fetch('/api/action/kill-process', {
+        const r = await apiFetch('/api/action/kill-process', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pid: c.pid, proc: c.proc }),
+          body: JSON.stringify({ pid: c.pid, proc: c.proc, confirm: true }),
         });
         const j = await r.json();
-        fb.textContent = j.ok ? `Processo ${c.proc} (#${c.pid}) encerrado.` : `Erro: ${j.error}`;
+        fb.textContent = j.ok ? `Processo ${c.proc} (#${c.pid}) encerrado.` : `Erro: ${j.message || j.error}`;
       } catch {
         fb.textContent = 'Falha ao encerrar processo.';
       }
@@ -926,7 +1037,7 @@ function openNodeInspector(node) {
       <div class="kv-k">ISP / Org</div><div class="kv-v">${escHtml(node.isp || node.org || '—')}</div>
       <div class="kv-k">ASN</div><div class="kv-v">${escHtml(node.asn || '—')}</div>
     </div>
-    ${firstIp ? `<div class="insp-actions"><button class="action-btn" id="btnTraceNode">🧭 Rastrear Rota (${escHtml(firstIp)})</button></div><div id="inspTraceBox"></div>` : ''}
+    ${firstIp && hasRole('operator') ? `<div class="insp-actions"><button class="action-btn" id="btnTraceNode">🧭 Rastrear Rota (${escHtml(firstIp)})</button></div><div id="inspTraceBox"></div>` : ''}
     <div class="insp-section-title">Sockets neste Nó</div>
     <div>${connsHtml}</div>
   `;
@@ -1025,19 +1136,32 @@ function syncTabButtons() {
   });
 }
 
-function connectWebSocket() {
+async function connectWebSocket() {
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
+  if (!state.auth.authenticated) return;
 
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${proto}//${location.host}/ws`);
+  let wsUrl = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
+  try {
+    const tr = await apiFetch('/api/auth/ws-ticket', { method: 'POST' });
+    if (tr.ok) {
+      const td = await tr.json();
+      if (td.ticket) wsUrl += `?ticket=${encodeURIComponent(td.ticket)}`;
+    } else if (tr.status === 401) {
+      return;
+    }
+  } catch {}
+
+  ws = new WebSocket(wsUrl);
 
   ws.onopen = () => {
     $('connDot').className = state.paused ? 'brand-pulse paused' : 'brand-pulse online';
-    const interval = $('intervalSelect').value;
-    ws.send(`interval:${interval}`);
+    if (hasRole('operator')) {
+      const interval = $('intervalSelect').value;
+      ws.send(`interval:${interval}`);
+    }
   };
 
   ws.onmessage = (ev) => {
@@ -1219,14 +1343,14 @@ async function init() {
       defaultView: $('cfgDefaultView').value,
     };
     try {
-      const resp = await fetch('/api/settings', {
+      const resp = await apiFetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
       const data = await resp.json();
       if (!resp.ok) {
-        fb.textContent = `Erro: ${data.error || 'falha ao salvar'}`;
+        fb.textContent = `Erro: ${data.message || data.error || 'falha ao salvar'}`;
         return;
       }
       fb.textContent = 'Configurações salvas!';
@@ -1239,15 +1363,15 @@ async function init() {
 
   $('btnMinimizeTray').addEventListener('click', async () => {
     try {
-      await fetch('/api/window/minimize-tray', { method: 'POST' });
+      await apiFetch('/api/window/minimize-tray', { method: 'POST' });
     } catch {}
   });
 
   $('btnProbeServices').addEventListener('click', async () => {
     try {
-      await fetch('/api/services/probe', { method: 'POST' });
+      await apiFetch('/api/services/probe', { method: 'POST' });
       setTimeout(async () => {
-        const resp = await fetch('/api/services');
+        const resp = await apiFetch('/api/services');
         if (resp.ok && state.snapshot) {
           state.snapshot.services = await resp.json();
           applyAndRender();
@@ -1283,7 +1407,7 @@ async function init() {
       lon,
     };
     try {
-      const resp = await fetch('/api/services/add', {
+      const resp = await apiFetch('/api/services/add', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -1317,7 +1441,9 @@ async function init() {
   window.addEventListener('keydown', (e) => {
     const inInput = document.activeElement === $('searchInput');
     if (e.key === 'Escape') {
-      if (!$('settingsModal').classList.contains('hidden')) {
+      if (!$('securityModal').classList.contains('hidden')) {
+        closeSecurityModal();
+      } else if (!$('settingsModal').classList.contains('hidden')) {
         closeSettingsModal();
       } else if (inInput) {
         $('searchInput').blur();
@@ -1350,8 +1476,113 @@ async function init() {
     }
   });
 
-  await loadInitialSettings();
-  connectWebSocket();
+  $('btnSecurity').addEventListener('click', () => {
+    if (!state.auth.authenticated) {
+      showAuthModal();
+    } else {
+      openSecurityModal();
+    }
+  });
+  $('btnCloseSecurity').addEventListener('click', closeSecurityModal);
+  $('securityModal').addEventListener('click', (e) => {
+    if (e.target === $('securityModal')) closeSecurityModal();
+  });
+  $('btnRefreshAudit').addEventListener('click', loadSecurityModalData);
+
+  $('authForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const token = $('authTokenInput').value.trim();
+    const fb = $('authFeedback');
+    fb.classList.add('hidden');
+    try {
+      const resp = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ token }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        fb.textContent = data.message || data.error || 'Token inválido.';
+        fb.classList.remove('hidden');
+        return;
+      }
+      state.auth.authenticated = true;
+      state.auth.role = data.role;
+      state.auth.actor = data.actor;
+      state.auth.csrfToken = data.csrfToken || '';
+      $('authTokenInput').value = '';
+      hideAuthModal();
+      updateAuthUi();
+      await loadInitialSettings();
+      connectWebSocket();
+      pollUpdateStatus();
+    } catch {
+      fb.textContent = 'Falha ao autenticar no motor local.';
+      fb.classList.remove('hidden');
+    }
+  });
+
+  $('btnLogoutSession').addEventListener('click', async () => {
+    try {
+      await apiFetch('/api/auth/logout', { method: 'POST' });
+    } catch {}
+    if (ws) ws.close();
+    state.auth.authenticated = false;
+    state.auth.role = 'none';
+    state.auth.csrfToken = '';
+    closeSecurityModal();
+    updateAuthUi();
+    showAuthModal('Sessão encerrada.');
+  });
+
+  $('btnRevokeAllSessions').addEventListener('click', async () => {
+    if (!confirm('Revogar TODAS as sessões ativas em todos os navegadores?')) return;
+    try {
+      const r = await apiFetch('/api/auth/tokens/revoke', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ allSessions: true }),
+      });
+      if (r.ok) {
+        if (ws) ws.close();
+        state.auth.authenticated = false;
+        state.auth.role = 'none';
+        state.auth.csrfToken = '';
+        closeSecurityModal();
+        updateAuthUi();
+        showAuthModal('Todas as sessões foram revogadas.');
+      }
+    } catch {}
+  });
+
+  $('createTokenForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const label = $('tokLabelInput').value.trim();
+    const role = $('tokRoleSelect').value;
+    try {
+      const resp = await apiFetch('/api/auth/tokens', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label, role }),
+      });
+      const data = await resp.json();
+      if (resp.ok && data.token) {
+        $('tokLabelInput').value = '';
+        const banner = $('newTokenBanner');
+        banner.innerHTML = `<span>Token (${escHtml(data.role)}): <code>${escHtml(data.token)}</code></span><button type="button" id="btnDismissNewTok">OK</button>`;
+        banner.classList.remove('hidden');
+        $('btnDismissNewTok').onclick = () => banner.classList.add('hidden');
+        await loadSecurityModalData();
+      }
+    } catch {}
+  });
+
+  const authed = await ensureAuthenticated();
+  if (authed) {
+    await loadInitialSettings();
+    connectWebSocket();
+  }
   initUpdateMonitor();
 }
 
@@ -1374,7 +1605,7 @@ function switchViewMode(mode) {
 
 async function loadInitialSettings() {
   try {
-    const resp = await fetch('/api/settings');
+    const resp = await apiFetch('/api/settings');
     if (!resp.ok) return;
     const cfg = await resp.json();
     if (cfg.defaultView === 'global' || cfg.defaultView === 'local') {
@@ -1396,7 +1627,7 @@ async function openSettingsModal() {
   $('settingsFeedback').classList.add('hidden');
   $('settingsModal').classList.remove('hidden');
   try {
-    const resp = await fetch('/api/settings');
+    const resp = await apiFetch('/api/settings');
     if (!resp.ok) return;
     const cfg = await resp.json();
     $('cfgAlertsEnabled').checked = !!cfg.alertsEnabled;
@@ -1413,6 +1644,123 @@ async function openSettingsModal() {
 
 function closeSettingsModal() {
   $('settingsModal').classList.add('hidden');
+}
+
+async function openSecurityModal() {
+  $('securityModal').classList.remove('hidden');
+  $('newTokenBanner').classList.add('hidden');
+  $('secSessionSummary').textContent = `Ator: ${state.auth.actor || 'local'} · Nível: ${state.auth.role} · ${state.auth.tlsEnabled ? 'TLS ativo' : 'HTTP local'}`;
+  $('secTokensSection').classList.toggle('hidden', !hasRole('administrator'));
+  $('btnRevokeAllSessions').classList.toggle('hidden', !hasRole('administrator'));
+  await loadSecurityModalData();
+}
+
+function closeSecurityModal() {
+  $('securityModal').classList.add('hidden');
+}
+
+async function loadSecurityModalData() {
+  const isAdmin = hasRole('administrator');
+  if (isAdmin) {
+    try {
+      const tr = await apiFetch('/api/auth/tokens');
+      if (tr.ok) {
+        const td = await tr.json();
+        const tokens = td.tokens || [];
+        $('secTokensList').innerHTML =
+          tokens.length === 0
+            ? '<div class="sec-row"><span class="sec-row-meta">Nenhum token cadastrado.</span></div>'
+            : tokens
+                .map(
+                  (t) => `
+                <div class="sec-row">
+                  <div>
+                    <div><strong>${escHtml(t.label)}</strong> <span class="state-pill">${escHtml(t.role)}</span></div>
+                    <div class="sec-row-meta">${escHtml(t.id)} · ${escHtml(t.prefix)}... ${t.revoked ? '· REVOGADO' : ''}</div>
+                  </div>
+                  ${!t.revoked ? `<button type="button" class="svc-del-btn" data-revoke-tok="${escHtml(t.id)}">Revogar</button>` : ''}
+                </div>`
+                )
+                .join('');
+        $('secTokensList')
+          .querySelectorAll('[data-revoke-tok]')
+          .forEach((btn) => {
+            btn.onclick = async () => {
+              const id = btn.getAttribute('data-revoke-tok');
+              if (!confirm(`Revogar token ${id}?`)) return;
+              await apiFetch('/api/auth/tokens/revoke', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id }),
+              });
+              loadSecurityModalData();
+            };
+          });
+      }
+    } catch {}
+  }
+
+  try {
+    const br = await apiFetch('/api/security/blocks');
+    if (br.ok) {
+      const bd = await br.json();
+      const blocks = bd.blocks || [];
+      $('secBlocksList').innerHTML =
+        blocks.length === 0
+          ? '<div class="sec-row"><span class="sec-row-meta">Nenhum IP bloqueado pelo NetPulse.</span></div>'
+          : blocks
+              .map(
+                (b) => `
+              <div class="sec-row">
+                <div>
+                  <div><strong>${escHtml(b.ip)}</strong></div>
+                  <div class="sec-row-meta">Por ${escHtml(b.actor)} · ${new Date(b.blockedAt).toLocaleString('pt-BR')}</div>
+                </div>
+                ${isAdmin ? `<button type="button" class="mini-pill-btn" data-unblock-ip="${escHtml(b.ip)}">Reverter</button>` : ''}
+              </div>`
+              )
+              .join('');
+      $('secBlocksList')
+        .querySelectorAll('[data-unblock-ip]')
+        .forEach((btn) => {
+          btn.onclick = async () => {
+            const ip = btn.getAttribute('data-unblock-ip');
+            if (!confirm(`Remover regra de bloqueio de firewall para ${ip}?`)) return;
+            await apiFetch('/api/action/unblock-ip', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ ip, confirm: true }),
+            });
+            loadSecurityModalData();
+          };
+        });
+    }
+  } catch {}
+
+  try {
+    const ar = await apiFetch('/api/security/audit');
+    if (ar.ok) {
+      const ad = await ar.json();
+      const entries = ad.entries || [];
+      $('secAuditList').innerHTML =
+        entries.length === 0
+          ? '<div class="sec-row"><span class="sec-row-meta">Sem eventos de auditoria ainda.</span></div>'
+          : entries
+              .slice(0, 60)
+              .map((e) => {
+                const cls = e.outcome === 'denied' || e.outcome === 'failed' ? 'closed' : 'new';
+                return `
+                <div class="sec-row">
+                  <div style="min-width:0">
+                    <div><strong>${escHtml(e.action)}</strong> → ${escHtml(e.target)}</div>
+                    <div class="sec-row-meta">${escHtml(e.actor)} (${escHtml(e.role)}) · ${escHtml(e.sourceIp)} · ${new Date(e.ts).toLocaleTimeString('pt-BR')} · ${escHtml(e.detail)}</div>
+                  </div>
+                  <span class="state-pill ${cls}">${escHtml(e.outcome)}</span>
+                </div>`;
+              })
+              .join('');
+    }
+  } catch {}
 }
 
 let updatePollTimer = null;
@@ -1471,8 +1819,9 @@ function renderUpdateStatus(u) {
 }
 
 async function pollUpdateStatus() {
+  if (!state.auth.authenticated) return;
   try {
-    const resp = await fetch('/api/update/status');
+    const resp = await apiFetch('/api/update/status');
     if (!resp.ok) return;
     const u = await resp.json();
     renderUpdateStatus(u);
@@ -1492,15 +1841,20 @@ async function pollUpdateStatus() {
 function initUpdateMonitor() {
   $('btnCheckUpdate').addEventListener('click', async () => {
     try {
-      await fetch('/api/update/check', { method: 'POST' });
+      await apiFetch('/api/update/check', { method: 'POST' });
       pollUpdateStatus();
     } catch {}
   });
 
   $('btnApplyUpdate').addEventListener('click', async () => {
+    if (!confirm('Baixar e instalar a nova versão do NetPulse? O aplicativo será reiniciado.')) return;
     $('btnApplyUpdate').disabled = true;
     try {
-      await fetch('/api/update/apply', { method: 'POST' });
+      await apiFetch('/api/update/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm: true }),
+      });
       pollUpdateStatus();
     } catch {}
   });

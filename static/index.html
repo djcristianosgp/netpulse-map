@@ -71,6 +71,7 @@
       </select>
       <button class="ctrl-btn" id="btnPause" title="Pausar/Retomar stream (Espaço)">Pausar</button>
       <button class="ctrl-btn" id="btnReset" title="Mostrar planeta inteiro (R)">Planeta</button>
+      <button class="ctrl-btn" id="btnAnalytics" title="Histórico &amp; Analytics SQLite">📊 Analytics</button>
       <button class="ctrl-btn" id="btnSecurity" title="Segurança, Tokens & Auditoria">🛡 <span id="authRoleBadge">...</span></button>
       <button class="ctrl-btn" id="btnSettings" title="Configurações da aplicação">⚙</button>
       <button class="ctrl-btn" id="btnMinimizeTray" title="Minimizar para a bandeja do sistema">🗕</button>
@@ -239,6 +240,22 @@
           </select>
         </div>
 
+        <div class="setting-row setting-col">
+          <div class="setting-name">Retenção do histórico SQLite</div>
+          <div class="setting-desc">Define por quantos dias conexões, métricas e eventos são mantidos e o teto de armazenamento.</div>
+          <div class="add-svc-row" style="margin-top:6px">
+            <select id="cfgRetentionPreset" class="ctrl-select" style="flex:1;height:32px">
+              <option value="1">24 horas (1 dia)</option>
+              <option value="7">7 dias</option>
+              <option value="30">30 dias</option>
+              <option value="90">90 dias</option>
+              <option value="custom">Personalizado (dias)</option>
+            </select>
+            <input id="cfgRetentionDays" type="number" min="1" max="365" value="30" style="width:76px;height:32px;border-radius:7px;border:1px solid rgba(148,163,184,0.22);background:rgba(15,23,42,0.8);color:var(--text-main);padding:0 8px" title="Dias de retenção (1..365)" />
+            <input id="cfgMaxDbSizeMb" type="number" min="32" max="2048" value="256" style="width:86px;height:32px;border-radius:7px;border:1px solid rgba(148,163,184,0.22);background:rgba(15,23,42,0.8);color:var(--text-main);padding:0 8px" title="Limite máximo do banco em MB (32..2048)" />
+          </div>
+        </div>
+
         <div id="settingsFeedback" class="item-geo hidden"></div>
 
         <div class="modal-foot">
@@ -323,6 +340,97 @@
             <button type="button" class="mini-pill-btn" id="btnRefreshAudit">↻ Atualizar</button>
           </div>
           <div id="secAuditList" class="sec-list"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- History & Analytics Modal -->
+  <div id="analyticsModal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="anaTitle">
+    <div class="modal-card modal-card-xl glass">
+      <div class="modal-head">
+        <div>
+          <div class="insp-eyebrow">SQLITE WAL · HISTÓRICO &amp; ANALYTICS</div>
+          <h2 class="insp-title" id="anaTitle">Histórico de Rede e Rankings</h2>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <select id="anaRangeSelect" class="ctrl-select" style="height:28px">
+            <option value="24h">Últimas 24 horas</option>
+            <option value="7d" selected>Últimos 7 dias</option>
+            <option value="30d">Últimos 30 dias</option>
+            <option value="90d">Últimos 90 dias</option>
+          </select>
+          <button class="close-btn" id="btnCloseAnalytics" title="Fechar (Esc)">✕</button>
+        </div>
+      </div>
+      <div class="modal-body" style="max-height:80vh;overflow-y:auto">
+        <div class="tab-bar tab-bar-4" id="anaTabs">
+          <button type="button" class="tab-btn active" data-atab="overview">Analytics &amp; Top 10</button>
+          <button type="button" class="tab-btn" data-atab="connections">Histórico Conexões</button>
+          <button type="button" class="tab-btn" data-atab="processes">Aplicações</button>
+          <button type="button" class="tab-btn" data-atab="storage">Banco &amp; Retenção</button>
+        </div>
+
+        <div id="anaViewOverview" class="ana-view">
+          <div id="anaSummaryGrid" class="ana-kpi-grid"></div>
+          <div class="notify-group">
+            <div class="notify-cats-head" style="border-top:none;padding-top:0">
+              <span>Consumo Diário (↓ Download Ciano / ↑ Upload Verde)</span>
+            </div>
+            <canvas id="anaDailyChart" width="840" height="140" class="svc-spark" style="height:140px"></canvas>
+          </div>
+          <div class="ana-rankings-grid">
+            <div class="notify-group">
+              <div class="notify-cats-head" style="border-top:none;padding-top:0"><span>Top 10 Aplicações</span></div>
+              <div id="anaTopProcs" class="sec-list" style="max-height:240px"></div>
+            </div>
+            <div class="notify-group">
+              <div class="notify-cats-head" style="border-top:none;padding-top:0"><span>Top 10 Destinos</span></div>
+              <div id="anaTopDests" class="sec-list" style="max-height:240px"></div>
+            </div>
+            <div class="notify-group">
+              <div class="notify-cats-head" style="border-top:none;padding-top:0"><span>Top 10 Países</span></div>
+              <div id="anaTopCountries" class="sec-list" style="max-height:240px"></div>
+            </div>
+          </div>
+        </div>
+
+        <div id="anaViewConnections" class="ana-view hidden">
+          <div class="add-svc-row" style="flex-wrap:wrap">
+            <input id="histConnSearch" type="search" placeholder="Filtrar processo, IP, DNS, país ou porta..." style="flex:2;min-width:200px;height:30px;border-radius:7px;border:1px solid rgba(148,163,184,0.22);background:rgba(15,23,42,0.8);color:var(--text-main);padding:0 8px;font-size:12px" />
+            <select id="histConnScope" class="ctrl-select" style="height:30px">
+              <option value="">Todos escopos</option>
+              <option value="public">Públicas</option>
+              <option value="lan">LAN</option>
+              <option value="loopback">Loopback</option>
+            </select>
+            <select id="histConnProto" class="ctrl-select" style="height:30px">
+              <option value="">TCP/UDP</option>
+              <option value="TCP">TCP</option>
+              <option value="UDP">UDP</option>
+            </select>
+            <button type="button" class="ctrl-btn active" id="btnHistConnApply" style="height:30px">Filtrar</button>
+          </div>
+          <div id="histConnList" class="sec-list" style="max-height:420px"></div>
+          <div class="bw-banner" style="margin-bottom:0">
+            <span id="histConnPageInfo">0 registros</span>
+            <div style="display:flex;gap:6px">
+              <button type="button" class="ctrl-btn" id="btnHistPrev" style="height:26px;font-size:11px">◀ Anterior</button>
+              <button type="button" class="ctrl-btn" id="btnHistNext" style="height:26px;font-size:11px">Próxima ▶</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="anaViewProcesses" class="ana-view hidden">
+          <div class="add-svc-row">
+            <input id="histProcFilter" type="search" placeholder="Filtrar aplicação..." style="flex:1;height:30px;border-radius:7px;border:1px solid rgba(148,163,184,0.22);background:rgba(15,23,42,0.8);color:var(--text-main);padding:0 8px;font-size:12px" />
+            <button type="button" class="ctrl-btn active" id="btnHistProcApply" style="height:30px">Buscar</button>
+          </div>
+          <div id="histProcList" class="sec-list" style="max-height:450px"></div>
+        </div>
+
+        <div id="anaViewStorage" class="ana-view hidden">
+          <div id="histStorageCard" class="notify-group"></div>
         </div>
       </div>
     </div>

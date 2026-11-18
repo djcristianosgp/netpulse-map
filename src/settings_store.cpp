@@ -12,6 +12,8 @@
 #include "models.hpp"
 #include "settings_store.hpp"
 
+#include <algorithm>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 
@@ -120,6 +122,8 @@ void SettingsStore::load() {
       else if (k == "autoStart") settings_.autoStart = (v == "1" || v == "true");
       else if (k == "defaultView") settings_.defaultView = (v == "global") ? "global" : "local";
       else if (k == "minimizeToTray") settings_.minimizeToTray = (v == "1" || v == "true");
+      else if (k == "retentionDays") settings_.retentionDays = std::clamp(std::atoi(v.c_str()), 1, 365);
+      else if (k == "maxDbSizeMb") settings_.maxDbSizeMb = std::clamp(std::atoi(v.c_str()), 32, 2048);
     }
   }
   // Authoritative check against HKCU Run key (in case installer checked startup task)
@@ -138,7 +142,9 @@ void SettingsStore::save() {
       << "notifyNewCountry\t" << (settings_.notifyNewCountry ? "1" : "0") << '\n'
       << "autoStart\t" << (settings_.autoStart ? "1" : "0") << '\n'
       << "defaultView\t" << settings_.defaultView << '\n'
-      << "minimizeToTray\t" << (settings_.minimizeToTray ? "1" : "0") << '\n';
+      << "minimizeToTray\t" << (settings_.minimizeToTray ? "1" : "0") << '\n'
+      << "retentionDays\t" << settings_.retentionDays << '\n'
+      << "maxDbSizeMb\t" << settings_.maxDbSizeMb << '\n';
 }
 
 AppSettings SettingsStore::get() const {
@@ -151,6 +157,8 @@ AppSettings SettingsStore::get() const {
 bool SettingsStore::update(const AppSettings& next, std::string& outError) {
   AppSettings clean = next;
   clean.defaultView = (clean.defaultView == "global") ? "global" : "local";
+  clean.retentionDays = std::clamp(clean.retentionDays, 1, 365);
+  clean.maxDbSizeMb = std::clamp(clean.maxDbSizeMb, 32, 2048);
 
   if (!syncWindowsAutoStartRegistry(clean.autoStart, clean.minimizeToTray, outError)) {
     return false;
@@ -182,6 +190,10 @@ std::string SettingsStore::toJson() const {
   appendJsonEscaped(out, s.defaultView);
   out += ",\"minimizeToTray\":";
   out += (s.minimizeToTray ? "true" : "false");
+  out += ",\"retentionDays\":";
+  out += std::to_string(s.retentionDays);
+  out += ",\"maxDbSizeMb\":";
+  out += std::to_string(s.maxDbSizeMb);
   out.push_back('}');
   return out;
 }

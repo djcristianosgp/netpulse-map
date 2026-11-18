@@ -42,22 +42,31 @@ if errorlevel 1 (
 :msvc_ready
 set "ROOT=%~dp0"
 if not exist "%ROOT%build" mkdir "%ROOT%build"
+if not exist "%ROOT%build\obj_app" mkdir "%ROOT%build\obj_app"
+if not exist "%ROOT%build\obj_test" mkdir "%ROOT%build\obj_test"
 
 echo [Build] Compiling icon resource...
 rc /nologo /fo "%ROOT%build\netpulse.res" "%ROOT%src\netpulse.rc"
 if errorlevel 1 exit /b 1
 
+if not exist "%ROOT%build\sqlite3.obj" (
+  echo [Build] Compiling SQLite3 amalgamation...
+  cl /nologo /TC /O2 /DSQLITE_THREADSAFE=1 /Fo"%ROOT%build\sqlite3.obj" /c "%ROOT%third_party\sqlite\sqlite3.c"
+  if errorlevel 1 exit /b 1
+)
+
 echo [Build] Compiling netpulse.exe v%APP_VER% (C++20 /O2 GUI+Tray)...
-cl /nologo /std:c++20 /O2 /EHsc /W4 /utf-8 ^
-  /I"%ROOT%src" ^
+cl /nologo /MP /std:c++20 /O2 /EHsc /W4 /utf-8 ^
+  /I"%ROOT%src" /I"%ROOT%third_party\sqlite" ^
   /DNETPULSE_VERSION="\"%APP_VER%\"" ^
-  /Fo"%ROOT%build\\" /Fe"%ROOT%build\netpulse.exe" ^
+  /Fo"%ROOT%build\obj_app\\" /Fe"%ROOT%build\netpulse.exe" ^
   "%ROOT%src\main.cpp" ^
   "%ROOT%src\core\json_lite.cpp" ^
   "%ROOT%src\security\auth_manager.cpp" ^
   "%ROOT%src\security\audit_log.cpp" ^
   "%ROOT%src\security\rate_limiter.cpp" ^
   "%ROOT%src\security\tls_context.cpp" ^
+  "%ROOT%src\storage\sqlite_db.cpp" ^
   "%ROOT%src\api\api_router.cpp" ^
   "%ROOT%src\net_monitor.cpp" ^
   "%ROOT%src\geo_dns.cpp" ^
@@ -70,34 +79,37 @@ cl /nologo /std:c++20 /O2 /EHsc /W4 /utf-8 ^
   "%ROOT%src\history_store.cpp" ^
   "%ROOT%src\actions.cpp" ^
   "%ROOT%src\tray_host.cpp" ^
+  "%ROOT%build\sqlite3.obj" ^
   "%ROOT%build\netpulse.res" ^
   ws2_32.lib iphlpapi.lib winhttp.lib bcrypt.lib crypt32.lib secur32.lib shell32.lib advapi32.lib user32.lib ^
   /link /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup
 if errorlevel 1 exit /b 1
 
 echo [Build] Compiling test_core.exe...
-cl /nologo /std:c++20 /O2 /EHsc /W4 /utf-8 ^
-  /I"%ROOT%src" ^
+cl /nologo /MP /std:c++20 /O2 /EHsc /W4 /utf-8 ^
+  /I"%ROOT%src" /I"%ROOT%third_party\sqlite" ^
   /DNETPULSE_VERSION="\"%APP_VER%\"" ^
-  /Fo"%ROOT%build\\" /Fe"%ROOT%build\test_core.exe" ^
+  /Fo"%ROOT%build\obj_test\\" /Fe"%ROOT%build\test_core.exe" ^
   "%ROOT%tests\test_core.cpp" ^
-  "%ROOT%src\core\json_lite.cpp" ^
-  "%ROOT%src\security\auth_manager.cpp" ^
-  "%ROOT%src\security\audit_log.cpp" ^
-  "%ROOT%src\security\rate_limiter.cpp" ^
-  "%ROOT%src\security\tls_context.cpp" ^
-  "%ROOT%src\api\api_router.cpp" ^
-  "%ROOT%src\net_monitor.cpp" ^
-  "%ROOT%src\geo_dns.cpp" ^
-  "%ROOT%src\ws_server.cpp" ^
-  "%ROOT%src\updater.cpp" ^
-  "%ROOT%src\service_monitor.cpp" ^
-  "%ROOT%src\settings_store.cpp" ^
-  "%ROOT%src\mmdb_reader.cpp" ^
-  "%ROOT%src\traceroute.cpp" ^
-  "%ROOT%src\history_store.cpp" ^
-  "%ROOT%src\actions.cpp" ^
-  "%ROOT%src\tray_host.cpp" ^
+  "%ROOT%build\obj_app\json_lite.obj" ^
+  "%ROOT%build\obj_app\auth_manager.obj" ^
+  "%ROOT%build\obj_app\audit_log.obj" ^
+  "%ROOT%build\obj_app\rate_limiter.obj" ^
+  "%ROOT%build\obj_app\tls_context.obj" ^
+  "%ROOT%build\obj_app\sqlite_db.obj" ^
+  "%ROOT%build\obj_app\api_router.obj" ^
+  "%ROOT%build\obj_app\net_monitor.obj" ^
+  "%ROOT%build\obj_app\geo_dns.obj" ^
+  "%ROOT%build\obj_app\ws_server.obj" ^
+  "%ROOT%build\obj_app\updater.obj" ^
+  "%ROOT%build\obj_app\service_monitor.obj" ^
+  "%ROOT%build\obj_app\settings_store.obj" ^
+  "%ROOT%build\obj_app\mmdb_reader.obj" ^
+  "%ROOT%build\obj_app\traceroute.obj" ^
+  "%ROOT%build\obj_app\history_store.obj" ^
+  "%ROOT%build\obj_app\actions.obj" ^
+  "%ROOT%build\obj_app\tray_host.obj" ^
+  "%ROOT%build\sqlite3.obj" ^
   ws2_32.lib iphlpapi.lib winhttp.lib bcrypt.lib crypt32.lib secur32.lib shell32.lib advapi32.lib user32.lib
 if errorlevel 1 exit /b 1
 

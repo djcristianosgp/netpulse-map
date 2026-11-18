@@ -32,7 +32,9 @@ inline int closesocket(int s) { return ::close(s); }
 #include "../src/serializer.hpp"
 #include "../src/service_monitor.hpp"
 #include "../src/settings_store.hpp"
+#include "../src/storage/sqlite_db.hpp"
 #include "../src/traceroute.hpp"
+#include <chrono>
 #include "../src/updater.hpp"
 #include "../src/ws_server.hpp"
 
@@ -486,6 +488,60 @@ int testLiveSecurityHttpAndWsIntegration() {
   CHECK(static_cast<uint8_t>(wsResp[hdrEnd]) == 0x81);
   closesocket(ws);
 
+  // 12. Fase 1 History & Analytics API + RBAC + confirm guard
+  std::string storResp = sendRawHttp(
+      port,
+      "GET /api/v1/history/storage HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nAuthorization: Bearer np_adm_integration_secret_987654\r\n\r\n");
+  CHECK(storResp.find("200 OK") != std::string::npos);
+  CHECK(storResp.find("\"engine\":\"sqlite3\"") != std::string::npos);
+
+  std::string anaResp = sendRawHttp(
+      port,
+      "GET /api/v1/history/analytics?range=7d HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nAuthorization: Bearer np_adm_integration_secret_987654\r\n\r\n");
+  CHECK(anaResp.find("200 OK") != std::string::npos);
+  CHECK(anaResp.find("\"topProcesses\":") != std::string::npos);
+
+  std::string connHistResp = sendRawHttp(
+      port,
+      "GET /api/v1/history/connections?limit=5 HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nAuthorization: Bearer np_adm_integration_secret_987654\r\n\r\n");
+  CHECK(connHistResp.find("200 OK") != std::string::npos);
+  CHECK(connHistResp.find("\"items\":") != std::string::npos);
+
+  std::string procHistResp = sendRawHttp(
+      port,
+      "GET /api/v1/history/processes?range=24h HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nAuthorization: Bearer np_adm_integration_secret_987654\r\n\r\n");
+  CHECK(procHistResp.find("200 OK") != std::string::npos);
+
+  const std::string emptyJson = "{}";
+  std::string viewerPrune = sendRawHttp(
+      port,
+      "POST /api/v1/history/prune HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nCookie: np_session=" + viewerCookie +
+          "\r\nX-CSRF-Token: " + viewerCsrf +
+          "\r\nContent-Length: " + std::to_string(emptyJson.size()) + "\r\n\r\n" + emptyJson);
+  CHECK(viewerPrune.find("403 Forbidden") != std::string::npos);
+
+  std::string admPruneNoConfirm = sendRawHttp(
+      port,
+      "POST /api/v1/history/prune HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nCookie: np_session=" + admCookie +
+          "\r\nX-CSRF-Token: " + admCsrf +
+          "\r\nContent-Length: " + std::to_string(emptyJson.size()) + "\r\n\r\n" + emptyJson);
+  CHECK(admPruneNoConfirm.find("confirmation_required") != std::string::npos);
+
+  const std::string confirmJson = R"({"confirm":true})";
+  std::string admPruneOk = sendRawHttp(
+      port,
+      "POST /api/v1/history/prune HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nCookie: np_session=" + admCookie +
+          "\r\nX-CSRF-Token: " + admCsrf +
+          "\r\nContent-Length: " + std::to_string(confirmJson.size()) + "\r\n\r\n" + confirmJson);
+  CHECK(admPruneOk.find("200 OK") != std::string::npos);
+
   server.stop();
   std::filesystem::remove_all(tempRoot, ec);
   std::cout << "[PASS] testLiveSecurityHttpAndWsIntegration\n";
@@ -700,7 +756,9 @@ int testSettingsStorePersistence() {
         << "notifyServiceDown\t1\n"
         << "notifyServiceDegraded\t0\n"
         << "notifySensitivePort\t1\n"
-        << "notifyNewCountry\t0\n";
+        << "notifyNewCountry\t0\n"
+        << "retentionDays\t90\n"
+        << "maxDbSizeMb\t512\n";
   }
   SettingsStore store(tempPath);
   auto cfg = store.get();
@@ -711,8 +769,12 @@ int testSettingsStorePersistence() {
   CHECK(!cfg.notifyServiceDegraded);
   CHECK(cfg.notifySensitivePort);
   CHECK(!cfg.notifyNewCountry);
+  CHECK(cfg.retentionDays == 90);
+  CHECK(cfg.maxDbSizeMb == 512);
   CHECK(store.toJson().find("\"defaultView\":\"global\"") != std::string::npos);
   CHECK(store.toJson().find("\"notifyServiceDegraded\":false") != std::string::npos);
+  CHECK(store.toJson().find("\"retentionDays\":90") != std::string::npos);
+  CHECK(store.toJson().find("\"maxDbSizeMb\":512") != std::string::npos);
 
   auto histDir = std::filesystem::temp_directory_path() / "netpulse_settings_hist_test";
   std::filesystem::remove_all(histDir, ec);
@@ -740,6 +802,197 @@ int testSettingsStorePersistence() {
   return 0;
 }
 
+int testSqliteMigrationsAndTsvImport() {
+  auto dir = std::filesystem::temp_directory_path() / "netpulse_sqlite_tsv_test";
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+  std::filesystem::create_directories(dir, ec);
+
+  const uint64_t nowMs = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+
+  // Seed legacy TSV files prior to opening HistoryStore (including one expired 15-day-old event)
+  {
+    std::ofstream evOut(dir / "events_history.tsv");
+    evOut << (nowMs - 15ULL * 86400000ULL) << "\twarn\taction\tExpired Old Event\tstale-detail\n";
+    evOut << (nowMs - 60000) << "\twarn\tsensitive_port\tLegacy SSH\t192.168.1.50:22\n";
+    evOut << (nowMs - 30000) << "\tinfo\tservice_up\tDNS Up\t1.1.1.1 OK\n";
+  }
+  {
+    std::ofstream metOut(dir / "service_metrics.tsv");
+    metOut << (nowMs - 50000) << "\tcloudflare-dns\tok\t11.4\n";
+    metOut << (nowMs - 20000) << "\tcloudflare-dns\tok\t12.8\n";
+  }
+
+  {
+    HistoryStore hist(dir);
+    hist.flushNow();
+
+    CHECK(std::filesystem::exists(dir / "netpulse.db"));
+    CHECK(std::filesystem::exists(dir / ".tsv_imported_v1"));
+
+    std::string stats = hist.getStorageStatsJson();
+    CHECK(stats.find("\"journalMode\":\"wal\"") != std::string::npos);
+    CHECK(stats.find("\"integrityOk\":true") != std::string::npos);
+    CHECK(stats.find("\"schemaVersion\":1") != std::string::npos);
+
+    std::string evJson = hist.getEventsJson(50, 0, "warn", "");
+    CHECK(evJson.find("Legacy SSH") != std::string::npos);
+    CHECK(evJson.find("DNS Up") == std::string::npos);
+
+    std::string svcJson = hist.getServiceHistoryJson("cloudflare-dns", 20);
+    CHECK(svcJson.find("11.4") != std::string::npos);
+    CHECK(svcJson.find("12.8") != std::string::npos);
+    hist.stop();
+  }
+
+  // Re-open to verify idempotent restart, migration persistence, and retention pruning
+  {
+    HistoryStore hist2(dir);
+    std::string evJson2 = hist2.getEventsJson(50, 0, "", "");
+    CHECK(evJson2.find("Legacy SSH") != std::string::npos);
+
+    // 15-day-old event lives in SQLite (beyond 7d hot cache) and is removed when 7d retention prunes
+    std::string oldActionBefore = hist2.getEventsJson(50, 0, "", "action");
+    CHECK(oldActionBefore.find("Expired Old Event") != std::string::npos);
+
+    hist2.setRetentionConfig(7, 128);
+    CHECK(hist2.pruneNow());
+    std::string oldActionAfter = hist2.getEventsJson(50, 0, "", "action");
+    CHECK(oldActionAfter.find("Expired Old Event") == std::string::npos);
+    CHECK(hist2.getEventsJson(50, 0, "", "").find("Legacy SSH") != std::string::npos);
+    hist2.stop();
+  }
+
+  std::filesystem::remove_all(dir, ec);
+  std::cout << "[PASS] testSqliteMigrationsAndTsvImport\n";
+  return 0;
+}
+
+int testHistoryAnalyticsAndRetention() {
+  auto dir = std::filesystem::temp_directory_path() / "netpulse_analytics_test";
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+
+  {
+    HistoryStore hist(dir);
+    GeoDnsService geo(dir);
+
+    const uint64_t nowMs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+
+    TelemetrySnapshot snap;
+    snap.timestampMs = nowMs;
+    snap.totalConnections = 2;
+    snap.publicConnections = 2;
+    snap.nic.rxBytesPerSec = 200000.0;
+    snap.nic.txBytesPerSec = 50000.0;
+
+    SocketEntry s1;
+    s1.key = "TCP:4000:104.16.132.229:443:1001";
+    s1.processName = "chrome.exe";
+    s1.processPath = "C:\\Program Files\\Google\\Chrome\\chrome.exe";
+    s1.pid = 1001;
+    s1.localIp = "192.168.1.10";
+    s1.remoteIp = "104.16.132.229";
+    s1.localPort = 51001;
+    s1.remotePort = 443;
+    s1.protocol = "TCP";
+    s1.ipVersion = 4;
+    s1.state = "ESTABLISHED";
+    s1.scope = IpScope::Public;
+    s1.lifecycle = Lifecycle::New;
+    s1.firstSeenMs = nowMs - 2000;
+    s1.lastSeenMs = nowMs;
+    s1.rxBps = 180000.0;
+    s1.txBps = 40000.0;
+
+    SocketEntry s2 = s1;
+    s2.key = "UDP:4001:8.8.8.8:53:2002";
+    s2.processName = "dnscrypt.exe";
+    s2.processPath = "C:\\Tools\\dnscrypt.exe";
+    s2.pid = 2002;
+    s2.remoteIp = "8.8.8.8";
+    s2.localPort = 52002;
+    s2.remotePort = 53;
+    s2.protocol = "UDP";
+    s2.rxBps = 20000.0;
+    s2.txBps = 10000.0;
+
+    snap.connections = {s1, s2};
+    snap.processStats = {
+        {1001, "chrome.exe", s1.processPath, 1, 1, 180000.0, 40000.0, 220000.0},
+        {2002, "dnscrypt.exe", s2.processPath, 1, 1, 20000.0, 10000.0, 30000.0},
+    };
+
+    hist.processTelemetry(snap, geo);
+    hist.flushNow();
+
+    ConnectionQuery cq;
+    cq.search = "chrome";
+    cq.limit = 10;
+    std::string connJson = hist.queryConnectionsJson(cq);
+    CHECK(connJson.find("chrome.exe") != std::string::npos);
+    CHECK(connJson.find("104.16.132.229") != std::string::npos);
+
+    std::string procJson = hist.queryProcessesJson("24h", 20, 0, "chrome");
+    CHECK(procJson.find("chrome.exe") != std::string::npos);
+
+    std::string anaJson = hist.queryAnalyticsJson("7d");
+    CHECK(anaJson.find("\"totalConnections\":2") != std::string::npos);
+    CHECK(anaJson.find("chrome.exe") != std::string::npos);
+    CHECK(anaJson.find("104.16.132.229") != std::string::npos);
+
+    // Benchmark 1,500 batched connection records to verify WAL write throughput.
+    const auto t0 = std::chrono::steady_clock::now();
+    TelemetrySnapshot bulkSnap;
+    bulkSnap.timestampMs = nowMs + 1000;
+    bulkSnap.totalConnections = 1500;
+    bulkSnap.publicConnections = 1500;
+    bulkSnap.nic.rxBytesPerSec = 1000.0;
+    bulkSnap.nic.txBytesPerSec = 500.0;
+    bulkSnap.connections.reserve(1500);
+    for (int i = 0; i < 1500; ++i) {
+      SocketEntry bs;
+      bs.key = "TCP:5000:" + std::to_string(i) + ":443:9000";
+      bs.processName = "bench.exe";
+      bs.pid = 9000;
+      bs.localIp = "10.0.0.2";
+      bs.remoteIp = "93.184.216." + std::to_string((i % 200) + 1);
+      bs.localPort = static_cast<uint16_t>(10000 + (i % 40000));
+      bs.remotePort = 443;
+      bs.protocol = "TCP";
+      bs.ipVersion = 4;
+      bs.state = "ESTABLISHED";
+      bs.scope = IpScope::Public;
+      bs.lifecycle = Lifecycle::New;
+      bs.firstSeenMs = nowMs + 1000;
+      bs.lastSeenMs = nowMs + 1000;
+      bulkSnap.connections.push_back(std::move(bs));
+    }
+    hist.processTelemetry(bulkSnap, geo);
+    hist.flushNow();
+    const auto elapsedMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    std::cout << "  [BENCH] 1,500 connections ingested + flushed to SQLite WAL in " << elapsedMs << " ms\n";
+
+    std::string postBench = hist.queryAnalyticsJson("24h");
+    CHECK(postBench.find("bench.exe") != std::string::npos);
+
+    hist.setRetentionConfig(7, 128);
+    CHECK(hist.pruneNow());
+    hist.stop();
+  }
+
+  std::filesystem::remove_all(dir, ec);
+  std::cout << "[PASS] testHistoryAnalyticsAndRetention\n";
+  return 0;
+}
+
 int main() {
 #ifdef _WIN32
   WSADATA wsa{};
@@ -759,6 +1012,8 @@ int main() {
   rc |= testServiceMonitorParsing();
   rc |= testMmdbAndHistorySecurity();
   rc |= testSettingsStorePersistence();
+  rc |= testSqliteMigrationsAndTsvImport();
+  rc |= testHistoryAnalyticsAndRetention();
 
 #ifdef _WIN32
   WSACleanup();

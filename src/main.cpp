@@ -347,6 +347,7 @@ int main(int argc, char** argv) {
         cfg.notifySensitivePort,
         cfg.notifyNewCountry,
     });
+    history.setRetentionConfig(cfg.retentionDays, cfg.maxDbSizeMb);
   };
   syncHistoryNotifications(initCfg);
   history.setAlertCallback([](const std::string& title, const std::string& body, bool isWarning) {
@@ -560,6 +561,7 @@ int main(int argc, char** argv) {
   serviceMon.stop();
   updater.stop();
   server.stop();
+  history.stop();
   geoDns.stop();
   netpulse::releaseSingleInstance(instanceMutex);
 #ifdef _WIN32

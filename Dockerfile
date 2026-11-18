@@ -2,22 +2,26 @@
 FROM debian:bookworm-slim AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
     g++ \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 COPY src/ ./src/
+COPY third_party/ ./third_party/
 
 RUN mkdir -p /out && \
-    g++ -std=c++20 -O2 -Wall -Wextra -pthread -Isrc \
-      -DNETPULSE_VERSION=\"1.3.0\" \
+    gcc -O2 -DSQLITE_THREADSAFE=1 -c third_party/sqlite/sqlite3.c -o /out/sqlite3.o && \
+    g++ -std=c++20 -O2 -Wall -Wextra -pthread -Isrc -Ithird_party/sqlite \
+      -DNETPULSE_VERSION=\"1.4.0\" \
       src/main.cpp \
       src/core/json_lite.cpp \
       src/security/auth_manager.cpp \
       src/security/audit_log.cpp \
       src/security/rate_limiter.cpp \
       src/security/tls_context.cpp \
+      src/storage/sqlite_db.cpp \
       src/api/api_router.cpp \
       src/net_monitor.cpp \
       src/geo_dns.cpp \
@@ -30,8 +34,9 @@ RUN mkdir -p /out && \
       src/history_store.cpp \
       src/actions.cpp \
       src/tray_host.cpp \
+      /out/sqlite3.o \
       -o /out/netpulse \
-      -lssl -lcrypto
+      -lssl -lcrypto -ldl
 
 # Stage 2: Minimal runtime image
 FROM debian:bookworm-slim

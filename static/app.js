@@ -58,6 +58,13 @@ const state = {
   selectedServiceId: null,
   rxHistory: new Array(60).fill(0),
   txHistory: new Array(60).fill(0),
+  analytics: {
+    tab: 'overview',
+    range: '7d',
+    connOffset: 0,
+    connLimit: 30,
+    connTotal: 0,
+  },
   auth: {
     authenticated: false,
     role: 'none',
@@ -1332,6 +1339,8 @@ async function init() {
     const fb = $('settingsFeedback');
     fb.classList.remove('hidden');
     fb.textContent = 'Salvando configurações...';
+    const retDays = Math.max(1, Math.min(365, parseInt($('cfgRetentionDays').value, 10) || 30));
+    const maxDbMb = Math.max(32, Math.min(2048, parseInt($('cfgMaxDbSizeMb').value, 10) || 256));
     const payload = {
       alertsEnabled: $('cfgAlertsEnabled').checked,
       notifyServiceDown: $('cfgNotifyServiceDown').checked,
@@ -1341,6 +1350,8 @@ async function init() {
       autoStart: $('cfgAutoStart').checked,
       minimizeToTray: $('cfgMinimizeToTray').checked,
       defaultView: $('cfgDefaultView').value,
+      retentionDays: retDays,
+      maxDbSizeMb: maxDbMb,
     };
     try {
       const resp = await apiFetch('/api/settings', {
@@ -1441,7 +1452,9 @@ async function init() {
   window.addEventListener('keydown', (e) => {
     const inInput = document.activeElement === $('searchInput');
     if (e.key === 'Escape') {
-      if (!$('securityModal').classList.contains('hidden')) {
+      if (!$('analyticsModal').classList.contains('hidden')) {
+        closeAnalyticsModal();
+      } else if (!$('securityModal').classList.contains('hidden')) {
         closeSecurityModal();
       } else if (!$('settingsModal').classList.contains('hidden')) {
         closeSettingsModal();
@@ -1488,6 +1501,64 @@ async function init() {
     if (e.target === $('securityModal')) closeSecurityModal();
   });
   $('btnRefreshAudit').addEventListener('click', loadSecurityModalData);
+
+  $('cfgRetentionPreset').addEventListener('change', () => {
+    const val = $('cfgRetentionPreset').value;
+    if (val !== 'custom') {
+      $('cfgRetentionDays').value = val;
+    }
+  });
+  $('cfgRetentionDays').addEventListener('input', () => {
+    const d = String(parseInt($('cfgRetentionDays').value, 10) || '');
+    $('cfgRetentionPreset').value = ['1', '7', '30', '90'].includes(d) ? d : 'custom';
+  });
+
+  $('btnAnalytics').addEventListener('click', openAnalyticsModal);
+  $('btnCloseAnalytics').addEventListener('click', closeAnalyticsModal);
+  $('analyticsModal').addEventListener('click', (e) => {
+    if (e.target === $('analyticsModal')) closeAnalyticsModal();
+  });
+  $('anaRangeSelect').addEventListener('change', () => {
+    state.analytics.range = $('anaRangeSelect').value;
+    loadActiveAnalyticsTab();
+  });
+  document.querySelectorAll('#anaTabs .tab-btn[data-atab]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.analytics.tab = btn.getAttribute('data-atab');
+      document.querySelectorAll('#anaTabs .tab-btn[data-atab]').forEach((b) => {
+        b.classList.toggle('active', b.getAttribute('data-atab') === state.analytics.tab);
+      });
+      loadActiveAnalyticsTab();
+    });
+  });
+  $('btnHistConnApply').addEventListener('click', () => {
+    state.analytics.connOffset = 0;
+    loadAnalyticsConnections();
+  });
+  $('histConnSearch').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      state.analytics.connOffset = 0;
+      loadAnalyticsConnections();
+    }
+  });
+  $('btnHistPrev').addEventListener('click', () => {
+    state.analytics.connOffset = Math.max(0, state.analytics.connOffset - state.analytics.connLimit);
+    loadAnalyticsConnections();
+  });
+  $('btnHistNext').addEventListener('click', () => {
+    if (state.analytics.connOffset + state.analytics.connLimit < state.analytics.connTotal) {
+      state.analytics.connOffset += state.analytics.connLimit;
+      loadAnalyticsConnections();
+    }
+  });
+  $('btnHistProcApply').addEventListener('click', loadAnalyticsProcesses);
+  $('histProcFilter').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      loadAnalyticsProcesses();
+    }
+  });
 
   $('authForm').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -1639,6 +1710,10 @@ async function openSettingsModal() {
     $('cfgAutoStart').checked = !!cfg.autoStart;
     $('cfgMinimizeToTray').checked = !!cfg.minimizeToTray;
     $('cfgDefaultView').value = cfg.defaultView === 'global' ? 'global' : 'local';
+    const retDays = Number(cfg.retentionDays) || 30;
+    $('cfgRetentionDays').value = retDays;
+    $('cfgRetentionPreset').value = ['1', '7', '30', '90'].includes(String(retDays)) ? String(retDays) : 'custom';
+    $('cfgMaxDbSizeMb').value = Number(cfg.maxDbSizeMb) || 256;
   } catch {}
 }
 
@@ -1759,6 +1834,261 @@ async function loadSecurityModalData() {
                 </div>`;
               })
               .join('');
+    }
+  } catch {}
+}
+
+function formatTotalBytes(bytes) {
+  const n = Number(bytes) || 0;
+  if (n < 1024) return `${n} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let val = n / 1024;
+  let idx = 0;
+  while (val >= 1024 && idx < units.length - 1) {
+    val /= 1024;
+    idx++;
+  }
+  return `${val >= 100 ? val.toFixed(0) : val.toFixed(1)} ${units[idx]}`;
+}
+
+function openAnalyticsModal() {
+  $('analyticsModal').classList.remove('hidden');
+  loadActiveAnalyticsTab();
+}
+
+function closeAnalyticsModal() {
+  $('analyticsModal').classList.add('hidden');
+}
+
+function syncAnalyticsViews() {
+  const tab = state.analytics.tab;
+  $('anaViewOverview').classList.toggle('hidden', tab !== 'overview');
+  $('anaViewConnections').classList.toggle('hidden', tab !== 'connections');
+  $('anaViewProcesses').classList.toggle('hidden', tab !== 'processes');
+  $('anaViewStorage').classList.toggle('hidden', tab !== 'storage');
+}
+
+async function loadActiveAnalyticsTab() {
+  syncAnalyticsViews();
+  const tab = state.analytics.tab;
+  if (tab === 'overview') await loadAnalyticsOverview();
+  else if (tab === 'connections') await loadAnalyticsConnections();
+  else if (tab === 'processes') await loadAnalyticsProcesses();
+  else if (tab === 'storage') await loadAnalyticsStorage();
+}
+
+function renderDailyTrafficChart(series) {
+  const canvas = $('anaDailyChart');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  if (!series || series.length === 0) {
+    ctx.fillStyle = 'rgba(148, 163, 184, 0.7)';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Ainda sem amostras diárias acumuladas neste período.', w / 2, h / 2);
+    return;
+  }
+
+  let maxVal = 1;
+  for (const pt of series) {
+    maxVal = Math.max(maxVal, Number(pt.rxBytes) || 0, Number(pt.txBytes) || 0);
+  }
+  const padL = 12;
+  const padR = 12;
+  const padT = 14;
+  const padB = 22;
+  const plotW = w - padL - padR;
+  const plotH = h - padT - padB;
+  const groupW = plotW / series.length;
+  const barW = Math.max(4, Math.min(22, (groupW - 8) / 2));
+
+  series.forEach((pt, idx) => {
+    const cx = padL + idx * groupW + groupW / 2;
+    const rxH = Math.round(((Number(pt.rxBytes) || 0) / maxVal) * plotH);
+    const txH = Math.round(((Number(pt.txBytes) || 0) / maxVal) * plotH);
+
+    ctx.fillStyle = '#38bdf8';
+    ctx.fillRect(cx - barW - 1, padT + plotH - rxH, barW, Math.max(2, rxH));
+
+    ctx.fillStyle = '#34d399';
+    ctx.fillRect(cx + 1, padT + plotH - txH, barW, Math.max(2, txH));
+
+    const label = new Date(pt.dayMs).toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+    ctx.fillStyle = 'rgba(148, 163, 184, 0.8)';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(label, cx, h - 6);
+  });
+}
+
+async function loadAnalyticsOverview() {
+  try {
+    const resp = await apiFetch(`/api/history/analytics?range=${encodeURIComponent(state.analytics.range)}`);
+    if (!resp.ok) return;
+    const d = await resp.json();
+    const s = d.summary || {};
+
+    $('anaSummaryGrid').innerHTML = `
+      <div class="ana-kpi-card"><div class="ana-kpi-lbl">Download (RX)</div><div class="ana-kpi-val" style="color:var(--accent-rx)">${formatTotalBytes(s.rxBytes)}</div></div>
+      <div class="ana-kpi-card"><div class="ana-kpi-lbl">Upload (TX)</div><div class="ana-kpi-val" style="color:var(--accent-tx)">${formatTotalBytes(s.txBytes)}</div></div>
+      <div class="ana-kpi-card"><div class="ana-kpi-lbl">Conexões Registradas</div><div class="ana-kpi-val">${Number(s.totalConnections || 0)}</div></div>
+      <div class="ana-kpi-card"><div class="ana-kpi-lbl">Duração Média</div><div class="ana-kpi-val">${formatAge(s.avgDurationMs || 0)}</div></div>
+      <div class="ana-kpi-card"><div class="ana-kpi-lbl">Apps / Destinos / Países</div><div class="ana-kpi-val">${Number(s.uniqueProcesses || 0)} / ${Number(s.uniqueDestinations || 0)} / ${Number(s.uniqueCountries || 0)}</div></div>
+    `;
+
+    renderDailyTrafficChart(d.dailySeries || []);
+
+    const procs = d.topProcesses || [];
+    $('anaTopProcs').innerHTML = procs.length === 0
+      ? '<div class="sec-row"><span class="sec-row-meta">Sem dados no período.</span></div>'
+      : procs.map((p, i) => `
+        <div class="sec-row">
+          <div style="min-width:0">
+            <div><strong>#${i + 1} ${escHtml(p.process)}</strong></div>
+            <div class="sec-row-meta">${Number(p.connections || 0)} conns · ↓ ${formatTotalBytes(p.rxBytes)} · ↑ ${formatTotalBytes(p.txBytes)}</div>
+          </div>
+        </div>`).join('');
+
+    const dests = d.topDestinations || [];
+    $('anaTopDests').innerHTML = dests.length === 0
+      ? '<div class="sec-row"><span class="sec-row-meta">Sem destinos públicos no período.</span></div>'
+      : dests.map((x, i) => `
+        <div class="sec-row">
+          <div style="min-width:0">
+            <div><strong>#${i + 1} ${escHtml(x.dns || x.remoteIp)}</strong></div>
+            <div class="sec-row-meta">${escHtml(x.remoteIp)} · ${escHtml(x.country || '—')} · ${Number(x.connections || 0)}x · ↓ ${formatTotalBytes(x.rxBytes)}</div>
+          </div>
+        </div>`).join('');
+
+    const countries = d.topCountries || [];
+    $('anaTopCountries').innerHTML = countries.length === 0
+      ? '<div class="sec-row"><span class="sec-row-meta">Sem países registrados no período.</span></div>'
+      : countries.map((c, i) => `
+        <div class="sec-row">
+          <div style="min-width:0">
+            <div><strong>#${i + 1} ${escHtml(c.country || c.cc)}</strong> (${escHtml(c.cc)})</div>
+            <div class="sec-row-meta">${Number(c.connections || 0)} conns · ${Number(c.uniqueIps || 0)} IPs · ↓ ${formatTotalBytes(c.rxBytes)}</div>
+          </div>
+        </div>`).join('');
+  } catch {}
+}
+
+async function loadAnalyticsConnections() {
+  const q = new URLSearchParams();
+  q.set('limit', String(state.analytics.connLimit));
+  q.set('offset', String(state.analytics.connOffset));
+  const search = $('histConnSearch').value.trim();
+  const scope = $('histConnScope').value;
+  const proto = $('histConnProto').value;
+  if (search) q.set('search', search);
+  if (scope) q.set('scope', scope);
+  if (proto) q.set('protocol', proto);
+
+  try {
+    const resp = await apiFetch(`/api/history/connections?${q.toString()}`);
+    if (!resp.ok) return;
+    const d = await resp.json();
+    const items = d.items || [];
+    state.analytics.connTotal = Number(d.total || 0);
+
+    $('histConnList').innerHTML = items.length === 0
+      ? '<div class="sec-row"><span class="sec-row-meta">Nenhuma conexão encontrada para os filtros aplicados.</span></div>'
+      : items.map((c) => `
+        <div class="sec-row">
+          <div style="min-width:0">
+            <div><strong>${escHtml(c.process)}</strong> <span class="sec-row-meta">(PID ${Number(c.pid || 0)} · ${escHtml(c.protocol)} · ${escHtml(c.scope)})</span> → ${escHtml(c.dns || c.remoteIp)}:${Number(c.remotePort || 0)}</div>
+            <div class="sec-row-meta">${escHtml(c.localIp)}:${Number(c.localPort || 0)} · ${escHtml(c.country || 'Local')} · ${new Date(c.startedAt).toLocaleString('pt-BR')} · Duração ${formatAge(c.durationMs || 0)} · ↓ ${formatTotalBytes(c.rxBytes)} / ↑ ${formatTotalBytes(c.txBytes)}</div>
+          </div>
+          <span class="state-pill">${escHtml(c.state)}</span>
+        </div>`).join('');
+
+    const start = state.analytics.connTotal === 0 ? 0 : state.analytics.connOffset + 1;
+    const end = Math.min(state.analytics.connTotal, state.analytics.connOffset + items.length);
+    $('histConnPageInfo').textContent = `${start}–${end} de ${state.analytics.connTotal} registros`;
+  } catch {}
+}
+
+async function loadAnalyticsProcesses() {
+  const filter = $('histProcFilter').value.trim();
+  const q = new URLSearchParams({ range: state.analytics.range, limit: '60' });
+  if (filter) q.set('process', filter);
+  try {
+    const resp = await apiFetch(`/api/history/processes?${q.toString()}`);
+    if (!resp.ok) return;
+    const d = await resp.json();
+    const items = d.items || [];
+    $('histProcList').innerHTML = items.length === 0
+      ? '<div class="sec-row"><span class="sec-row-meta">Nenhuma aplicação registrada neste período.</span></div>'
+      : items.map((p) => `
+        <div class="sec-row">
+          <div style="min-width:0">
+            <div><strong>${escHtml(p.process)}</strong></div>
+            <div class="sec-row-meta">${escHtml(p.exePath || 'Caminho indisponível')} · ${Number(p.connections || 0)} conns · ${Number(p.uniqueDestinations || 0)} IPs · ${Number(p.countriesCount || 0)} países · Média ${formatAge(p.avgDurationMs || 0)}</div>
+          </div>
+          <div style="text-align:right;font-size:11px;white-space:nowrap">
+            <div style="color:var(--accent-rx)">↓ ${formatTotalBytes(p.rxBytes)}</div>
+            <div style="color:var(--accent-tx)">↑ ${formatTotalBytes(p.txBytes)}</div>
+          </div>
+        </div>`).join('');
+  } catch {}
+}
+
+async function loadAnalyticsStorage() {
+  try {
+    const resp = await apiFetch('/api/history/storage');
+    if (!resp.ok) return;
+    const st = await resp.json();
+    const t = st.tables || {};
+    const sizeMb = ((Number(st.sizeBytes) || 0) / (1024 * 1024)).toFixed(2);
+    $('histStorageCard').innerHTML = `
+      <div class="ana-kpi-grid" style="margin-bottom:12px">
+        <div class="ana-kpi-card"><div class="ana-kpi-lbl">Motor SQLite</div><div class="ana-kpi-val">${escHtml(st.sqliteVersion)} (${escHtml(st.journalMode)})</div></div>
+        <div class="ana-kpi-card"><div class="ana-kpi-lbl">Integridade</div><div class="ana-kpi-val">${st.integrityOk ? 'OK (quick_check)' : 'ATENÇÃO'}</div></div>
+        <div class="ana-kpi-card"><div class="ana-kpi-lbl">Tamanho em Disco</div><div class="ana-kpi-val">${sizeMb} / ${Number(st.maxDbSizeMb || 256)} MB</div></div>
+        <div class="ana-kpi-card"><div class="ana-kpi-lbl">Retenção Configurada</div><div class="ana-kpi-val">${Number(st.retentionDays || 30)} dias (v${Number(st.schemaVersion || 1)})</div></div>
+      </div>
+      <div class="sec-list" style="margin-bottom:12px">
+        <div class="sec-row"><span>Histórico de Conexões</span><strong>${Number(t.connectionHistory || 0)}</strong></div>
+        <div class="sec-row"><span>Amostras NIC (agregadas)</span><strong>${Number(t.nicSamples || 0)}</strong></div>
+        <div class="sec-row"><span>Rollups Tráfego / Processo</span><strong>${Number(t.trafficRollups || 0)}</strong></div>
+        <div class="sec-row"><span>Métricas de Serviços</span><strong>${Number(t.serviceMetrics || 0)}</strong></div>
+        <div class="sec-row"><span>Eventos e Alertas</span><strong>${Number(t.events || 0)}</strong></div>
+      </div>
+      <div class="bw-banner" style="margin-bottom:0">
+        <span>Limpeza manual aplica política de retenção e compacta o banco (WAL checkpoint + incremental vacuum).</span>
+        ${hasRole('administrator')
+          ? '<button type="button" class="ctrl-btn danger" id="btnPruneHistory">Executar Limpeza Agora</button>'
+          : '<span class="sec-row-meta">Requer perfil Administrator</span>'}
+      </div>
+      <div id="histPruneFeedback" class="item-geo hidden" style="margin-top:8px"></div>
+    `;
+    const btn = $('btnPruneHistory');
+    if (btn) {
+      btn.onclick = async () => {
+        if (!window.confirm('Aplicar política de retenção e compactar o histórico SQLite agora?')) return;
+        const fb = $('histPruneFeedback');
+        fb.classList.remove('hidden');
+        fb.textContent = 'Compactando histórico...';
+        try {
+          const pr = await apiFetch('/api/history/prune', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confirm: true }),
+          });
+          if (pr.ok) {
+            await loadAnalyticsStorage();
+          } else {
+            const err = await pr.json().catch(() => ({}));
+            fb.textContent = `Falha: ${err.message || err.error || pr.status}`;
+          }
+        } catch {
+          fb.textContent = 'Erro de comunicação ao compactar banco.';
+        }
+      };
     }
   } catch {}
 }

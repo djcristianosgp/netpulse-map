@@ -458,7 +458,84 @@ HttpResponse ApiRouter::handleHttp(const HttpRequest& req) {
     AuthContext auth;
     auto err = requireAuth(req, Role::Viewer, auth);
     if (err.statusCode != 200) return err;
-    return HttpResponse{200, "application/json; charset=utf-8", deps_.history.getEventsJson(150), {}};
+    size_t limit = static_cast<size_t>(std::clamp(std::atoi(req.queryParam("limit").c_str()), 0, 500));
+    if (limit == 0) limit = 150;
+    size_t offset = static_cast<size_t>(std::max(0, std::atoi(req.queryParam("offset").c_str())));
+    std::string sev = req.queryParam("severity");
+    std::string kind = req.queryParam("kind");
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        deps_.history.getEventsJson(limit, offset, sev, kind), {}};
+  }
+
+  if (path == "/api/history/connections" && method == "GET") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Viewer, auth);
+    if (err.statusCode != 200) return err;
+
+    ConnectionQuery q;
+    int lim = std::atoi(req.queryParam("limit").c_str());
+    q.limit = (lim > 0) ? static_cast<size_t>(std::clamp(lim, 1, 250)) : 50;
+    int off = std::atoi(req.queryParam("offset").c_str());
+    q.offset = (off > 0) ? static_cast<size_t>(off) : 0;
+    q.process = req.queryParam("process");
+    q.remoteIp = req.queryParam("remoteIp");
+    q.country = req.queryParam("country");
+    q.protocol = req.queryParam("protocol");
+    q.scope = req.queryParam("scope");
+    q.search = req.queryParam("q");
+    q.fromMs = std::strtoull(req.queryParam("fromMs").c_str(), nullptr, 10);
+    q.toMs = std::strtoull(req.queryParam("toMs").c_str(), nullptr, 10);
+    return HttpResponse{200, "application/json; charset=utf-8", deps_.history.queryConnectionsJson(q), {}};
+  }
+
+  if (path == "/api/history/processes" && method == "GET") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Viewer, auth);
+    if (err.statusCode != 200) return err;
+    std::string range = req.queryParam("range");
+    if (range.empty()) range = "7d";
+    int lim = std::atoi(req.queryParam("limit").c_str());
+    size_t limit = (lim > 0) ? static_cast<size_t>(std::clamp(lim, 1, 200)) : 50;
+    int off = std::atoi(req.queryParam("offset").c_str());
+    size_t offset = (off > 0) ? static_cast<size_t>(off) : 0;
+    std::string proc = req.queryParam("process");
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        deps_.history.queryProcessesJson(range, limit, offset, proc), {}};
+  }
+
+  if (path == "/api/history/analytics" && method == "GET") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Viewer, auth);
+    if (err.statusCode != 200) return err;
+    std::string range = req.queryParam("range");
+    if (range.empty()) range = "7d";
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        deps_.history.queryAnalyticsJson(range), {}};
+  }
+
+  if (path == "/api/history/storage" && method == "GET") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Viewer, auth);
+    if (err.statusCode != 200) return err;
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        deps_.history.getStorageStatsJson(), {}};
+  }
+
+  if (path == "/api/history/prune" && method == "POST") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Administrator, auth, "history.prune");
+    if (err.statusCode != 200) return err;
+    JsonValue body;
+    std::string parseErr;
+    if (!JsonValue::parse(req.body, body, parseErr) || !body.getBool("confirm", false)) {
+      return jsonError(400, "confirmation_required", "Confirmacao explicita obrigatoria");
+    }
+    bool ok = deps_.history.pruneNow();
+    deps_.audit.record(auth.actor, roleToString(auth.role), req.remoteIp,
+                       "history.prune", "netpulse.db", ok ? "allowed" : "failed",
+                       "Limpeza de retencao e vacuum executados");
+    return HttpResponse{ok ? 200 : 500, "application/json; charset=utf-8",
+                        deps_.history.getStorageStatsJson(), {}};
   }
 
   if (path == "/api/history/service" && method == "POST") {
@@ -528,6 +605,16 @@ HttpResponse ApiRouter::handleHttp(const HttpRequest& req) {
     }
     nextCfg.defaultView = sView;
     nextCfg.minimizeToTray = body.getBool("minimizeToTray", nextCfg.minimizeToTray);
+    int64_t retDays = body.getInt("retentionDays", nextCfg.retentionDays);
+    if (retDays < 1 || retDays > 365) {
+      return jsonError(400, "invalid_retention_days", "retentionDays deve estar entre 1 e 365");
+    }
+    nextCfg.retentionDays = static_cast<int>(retDays);
+    int64_t maxDbMb = body.getInt("maxDbSizeMb", nextCfg.maxDbSizeMb);
+    if (maxDbMb < 32 || maxDbMb > 2048) {
+      return jsonError(400, "invalid_max_db_size", "maxDbSizeMb deve estar entre 32 e 2048");
+    }
+    nextCfg.maxDbSizeMb = static_cast<int>(maxDbMb);
 
     std::string serr;
     if (!deps_.settings.update(nextCfg, serr)) {

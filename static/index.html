@@ -71,6 +71,8 @@
       </select>
       <button class="ctrl-btn" id="btnPause" title="Pausar/Retomar stream (Espaço)">Pausar</button>
       <button class="ctrl-btn" id="btnReset" title="Mostrar planeta inteiro (R)">Planeta</button>
+      <button class="ctrl-btn primary" id="btnModules" title="Central dos 12 Módulos (M)">⊞ 12 Módulos</button>
+      <button class="ctrl-btn" id="btnNoc" title="Modo NOC / TV Fullscreen Somente Leitura (N)">📺 NOC</button>
       <button class="ctrl-btn" id="btnQuality" title="Qualidade de Rede, Latência, Jitter, DNS &amp; Diagnóstico">📶 Qualidade</button>
       <button class="ctrl-btn" id="btnTraceModal" title="Traceroute Avançado, Histórico de Rotas &amp; Diff">🧭 Rotas</button>
       <button class="ctrl-btn" id="btnInterfaces" title="Multi-WAN &amp; Interfaces de Rede">🔌 Interfaces</button>
@@ -779,6 +781,92 @@
           <div id="fwRulesList" class="sec-list" style="max-height:44vh"></div>
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- Central dos 12 Módulos (Fase 8) -->
+  <div id="moduleDockModal" class="modal-backdrop hidden">
+    <div class="modal-card modal-card-xl glass">
+      <div class="modal-header">
+        <span class="modal-title">⊞ Navegação Unificada — 12 Módulos NetPulse</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <button type="button" class="ctrl-btn primary" id="btnDockOpenNoc" style="height:28px">📺 Abrir Modo NOC (TV Somente Leitura)</button>
+          <button class="close-btn" id="btnCloseModuleDock" title="Fechar (Esc)">✕</button>
+        </div>
+      </div>
+      <div class="modal-body" style="max-height:80vh;overflow-y:auto">
+        <div id="moduleDockGrid" class="module-dock-grid"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modo NOC / TV Fullscreen Somente Leitura (Fase 8) -->
+  <div id="nocOverlay" class="noc-overlay hidden">
+    <div class="noc-topbar glass">
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        <strong style="font-size:15px">📺 NetPulse NOC Wallboard</strong>
+        <span class="state-pill new">SOMENTE LEITURA · DETERMINÍSTICO</span>
+        <div id="nocHeaderBadges" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <div class="tab-bar tab-bar-3" id="nocFocusTabs">
+          <button type="button" class="tab-btn active" data-nfocus="all">360° Geral</button>
+          <button type="button" class="tab-btn" data-nfocus="quality">Qualidade &amp; WAN</button>
+          <button type="button" class="tab-btn" data-nfocus="topology">Topologia LAN</button>
+        </div>
+        <select id="nocRangeSelect" class="ctrl-select" style="height:28px">
+          <option value="24h" selected>Janela 24h</option>
+          <option value="7d">Janela 7d</option>
+          <option value="30d">Janela 30d</option>
+        </select>
+        <select id="nocIntervalSelect" class="ctrl-select" style="height:28px">
+          <option value="5" selected>Refresh 5s</option>
+          <option value="10">Refresh 10s</option>
+          <option value="30">Refresh 30s</option>
+        </select>
+        <label style="display:flex;align-items:center;gap:5px;font-size:11.5px;color:var(--text-muted);cursor:pointer">
+          <input type="checkbox" id="nocRotateToggle" /> Rotação TV (15s)
+        </label>
+        <span id="nocCountdown" class="sec-row-meta">Auto 5s</span>
+        <span id="nocClock" class="noc-clock">--:--:--</span>
+        <button type="button" class="ctrl-btn" id="btnNocRefresh" style="height:28px">↻</button>
+        <button type="button" class="ctrl-btn" id="btnNocFullscreen" style="height:28px">⛶ Tela Cheia</button>
+        <button type="button" class="ctrl-btn" id="btnNocClose" style="height:28px">✕ Sair</button>
+      </div>
+    </div>
+
+    <div id="nocKpiStrip" class="noc-kpi-strip"></div>
+
+    <div id="nocMainGrid" class="noc-grid">
+      <div class="noc-card" id="nocCardTraffic">
+        <div class="noc-card-title"><span>📊 Série Histórica RX/TX (SQLite WAL)</span></div>
+        <canvas id="nocTrafficCanvas" width="420" height="190" style="width:100%;height:190px;border-radius:8px"></canvas>
+      </div>
+      <div class="noc-card" id="nocCardTopApps">
+        <div class="noc-card-title"><span>🔥 Top Aplicações &amp; Países</span></div>
+        <div id="nocTopAppsBody" class="sec-list" style="max-height:220px"></div>
+      </div>
+      <div class="noc-card" id="nocCardQuality">
+        <div class="noc-card-title"><span>📶 Qualidade Multi-Alvo (RTT / P95 / Perda)</span></div>
+        <div id="nocQualityBody" class="sec-list" style="max-height:220px"></div>
+      </div>
+      <div class="noc-card" id="nocCardInterfaces">
+        <div class="noc-card-title"><span>🔌 Interfaces Multi-WAN</span></div>
+        <div id="nocInterfacesBody" class="sec-list" style="max-height:220px"></div>
+      </div>
+      <div class="noc-card" id="nocCardServices">
+        <div class="noc-card-title"><span>🌐 Serviços Âncora &amp; Diagnóstico</span></div>
+        <div id="nocServicesBody" class="sec-list" style="max-height:220px"></div>
+      </div>
+      <div class="noc-card" id="nocCardSecurity">
+        <div class="noc-card-title"><span>🧠 Intelligence &amp; Risco Comportamental</span></div>
+        <div id="nocSecurityBody" class="sec-list" style="max-height:220px"></div>
+      </div>
+    </div>
+
+    <div id="nocTopoStage" class="noc-card hidden" style="flex:1">
+      <div class="noc-card-title"><span>🕸 Topologia LAN ao Vivo (Somente Leitura)</span></div>
+      <canvas id="nocTopoCanvas" width="1100" height="520" class="lan-topo-canvas" style="height:68vh"></canvas>
     </div>
   </div>
 

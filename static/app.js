@@ -1,6 +1,7 @@
 import { decodeTopoJson } from './topo.js';
 import { PlanetMapCanvas } from './map-canvas.js';
 import { LanTopologyCanvas } from './lan-topo.js';
+import { NocDashboardController } from './noc-dashboard.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -1489,9 +1490,14 @@ async function init() {
 
   // Keyboard shortcuts
   window.addEventListener('keydown', (e) => {
-    const inInput = document.activeElement === $('searchInput');
+    const activeTag = document.activeElement?.tagName;
+    const inInput = activeTag === 'INPUT' || activeTag === 'TEXTAREA' || activeTag === 'SELECT';
     if (e.key === 'Escape') {
-      if (!$('intelligenceModal').classList.contains('hidden')) {
+      if ($('nocOverlay') && !$('nocOverlay').classList.contains('hidden')) {
+        nocController?.close();
+      } else if ($('moduleDockModal') && !$('moduleDockModal').classList.contains('hidden')) {
+        closeModuleDock();
+      } else if (!$('intelligenceModal').classList.contains('hidden')) {
         closeIntelligenceModal();
       } else if (!$('topologyModal').classList.contains('hidden')) {
         closeTopologyModal();
@@ -1528,6 +1534,14 @@ async function init() {
     if (e.code === 'Space') {
       e.preventDefault();
       togglePause();
+    } else if (e.key === 'm' || e.key === 'M') {
+      e.preventDefault();
+      if ($('moduleDockModal')?.classList.contains('hidden')) openModuleDock();
+      else closeModuleDock();
+    } else if (e.key === 'n' || e.key === 'N') {
+      e.preventDefault();
+      if ($('nocOverlay')?.classList.contains('hidden')) nocController?.open(false);
+      else nocController?.close();
     } else if (e.key === 'r' || e.key === 'R') {
       mapCanvas.fitPlanet();
     } else if (e.key === 'f' || e.key === 'F') {
@@ -1872,6 +1886,18 @@ async function init() {
   $('topoFilterSelect').addEventListener('change', applyTopologyView);
   $('topoSearchInput').addEventListener('input', applyTopologyView);
 
+  nocController = new NocDashboardController({ apiFetch });
+  $('btnModules').addEventListener('click', openModuleDock);
+  $('btnCloseModuleDock').addEventListener('click', closeModuleDock);
+  $('moduleDockModal').addEventListener('click', (e) => {
+    if (e.target === $('moduleDockModal')) closeModuleDock();
+  });
+  $('btnDockOpenNoc').addEventListener('click', () => {
+    closeModuleDock();
+    nocController.open(true);
+  });
+  $('btnNoc').addEventListener('click', () => nocController.open(false));
+
   $('authForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const token = $('authTokenInput').value.trim();
@@ -1900,6 +1926,10 @@ async function init() {
       await loadInitialSettings();
       connectWebSocket();
       pollUpdateStatus();
+      const qs = new URLSearchParams(window.location.search);
+      if (qs.get('noc') === '1' || window.location.hash === '#noc') {
+        nocController?.open(false);
+      }
     } catch {
       fb.textContent = 'Falha ao autenticar no motor local.';
       fb.classList.remove('hidden');
@@ -1965,8 +1995,157 @@ async function init() {
   if (authed) {
     await loadInitialSettings();
     connectWebSocket();
+    const qs = new URLSearchParams(window.location.search);
+    if (qs.get('noc') === '1' || window.location.hash === '#noc') {
+      nocController?.open(false);
+    }
   }
   initUpdateMonitor();
+}
+
+let nocController = null;
+
+function openModuleDock() {
+  renderModuleDock();
+  $('moduleDockModal').classList.remove('hidden');
+}
+
+function closeModuleDock() {
+  $('moduleDockModal').classList.add('hidden');
+}
+
+function renderModuleDock() {
+  const s = state.snapshot?.stats || {};
+  const svcs = state.snapshot?.services || [];
+  const upSvcs = svcs.filter((x) => x.status === 'up').length;
+  const openLeftAndTab = (tabName) => {
+    closeModuleDock();
+    switchViewMode('local');
+    if (!document.body.classList.contains('left-open')) {
+      document.body.classList.add('left-open');
+      $('toggleLeftBtn').textContent = '◀';
+      mapCanvas.fitPlanet();
+    }
+    state.tab = tabName;
+    syncTabButtons();
+    renderPanel();
+  };
+
+  const modules = [
+    {
+      id: 'global-map',
+      icon: '🌍',
+      title: '1. Mapa Global 2D',
+      badge: `${Number(s.publicConnections || 0)} fluxos`,
+      desc: 'Arcos geodésicos em tempo real, projeções e terminador Dia/Noite.',
+      action: () => { closeModuleDock(); switchViewMode('local'); mapCanvas.fitPlanet(true); },
+    },
+    {
+      id: 'connections',
+      icon: '🔌',
+      title: '2. Conexões Ativas',
+      badge: `${Number(s.totalConnections || 0)} sockets`,
+      desc: 'Inspeção instantânea TCP/UDP, PID, estado e filtro por escopo.',
+      action: () => openLeftAndTab('conns'),
+    },
+    {
+      id: 'processes',
+      icon: '📈',
+      title: '3. Consumo & Processos',
+      badge: `${Number((state.snapshot?.processes || []).length)} apps`,
+      desc: 'Aplicações que consomem internet e evolução RX/TX ao vivo.',
+      action: () => openLeftAndTab('bw'),
+    },
+    {
+      id: 'countries',
+      icon: '🏳️',
+      title: '4. Países & GeoIP',
+      badge: `${Number(s.countries || 0)} países`,
+      desc: 'Destinos internacionais, cidades, provedores e ASNs offline/online.',
+      action: () => openLeftAndTab('countries'),
+    },
+    {
+      id: 'services',
+      icon: '🌐',
+      title: '5. Serviços & Sonda TCP',
+      badge: `${upSvcs}/${svcs.length} UP`,
+      desc: 'Monitoramento contínuo de âncoras continentais e endpoints custom.',
+      action: () => { closeModuleDock(); switchViewMode('global'); },
+    },
+    {
+      id: 'quality',
+      icon: '📶',
+      title: '6. Qualidade de Rede',
+      badge: 'P50–P99 · Jitter',
+      desc: 'Latência contínua, jitter, packet loss, DNS RFC-1035 e diagnóstico.',
+      action: () => { closeModuleDock(); openQualityModal(); },
+    },
+    {
+      id: 'traceroute',
+      icon: '🧭',
+      title: '7. Rotas & Traceroute',
+      badge: 'Route Diff',
+      desc: 'Salto a salto com GeoIP/ASN, monitoramento agendado e diff TTL.',
+      action: () => { closeModuleDock(); openTraceModal(); },
+    },
+    {
+      id: 'interfaces',
+      icon: '🔗',
+      title: '8. Multi-WAN & Interfaces',
+      badge: 'Links & Gateways',
+      desc: 'Inventário Ethernet/Wi-Fi/VPN/Virtual, RX/TX e transições failover.',
+      action: () => { closeModuleDock(); openInterfacesModal(); },
+    },
+    {
+      id: 'discovery',
+      icon: '🛰',
+      title: '9. Descoberta LAN',
+      badge: 'ARP · OUI',
+      desc: 'Hosts na rede local, fabricantes IEEE OUI, MAC LAA e portas.',
+      action: () => { closeModuleDock(); openDiscoveryModal(); },
+    },
+    {
+      id: 'topology',
+      icon: '🕸',
+      title: '10. Topologia LAN',
+      badge: 'Grafo Evidências',
+      desc: 'Visualização hierárquica Host → NIC → Gateway/DNS → Dispositivos.',
+      action: () => { closeModuleDock(); openTopologyModal(); },
+    },
+    {
+      id: 'intelligence',
+      icon: '🧠',
+      title: '11. Intelligence & Firewall',
+      badge: 'Zero IA · Regras',
+      desc: 'Detecção comportamental determinística, allow/blocklist e firewall.',
+      action: () => { closeModuleDock(); openIntelligenceModal(); },
+    },
+    {
+      id: 'analytics',
+      icon: '📊',
+      title: '12. Histórico & Analytics',
+      badge: 'SQLite WAL',
+      desc: 'Top 10 apps/destinos/países, séries RX/TX e retenção configurável.',
+      action: () => { closeModuleDock(); openAnalyticsModal(); },
+    },
+  ];
+
+  const grid = $('moduleDockGrid');
+  grid.innerHTML = modules.map((m) => `
+    <button type="button" class="module-card" data-mod="${escHtml(m.id)}">
+      <div class="module-card-top">
+        <span>${m.icon} ${escHtml(m.title)}</span>
+        <span class="state-pill">${escHtml(m.badge)}</span>
+      </div>
+      <div class="module-card-desc">${escHtml(m.desc)}</div>
+    </button>
+  `).join('');
+
+  grid.querySelectorAll('.module-card').forEach((btn) => {
+    const id = btn.getAttribute('data-mod');
+    const mod = modules.find((x) => x.id === id);
+    if (mod) btn.addEventListener('click', mod.action);
+  });
 }
 
 function switchViewMode(mode) {

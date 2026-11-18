@@ -755,6 +755,34 @@ int testLiveSecurityHttpAndWsIntegration() {
   CHECK(fwOkResp.find("200 OK") != std::string::npos);
   CHECK(fwOkResp.find("NetPulse_TestBlock") != std::string::npos);
 
+  // 19. Fase 8 NOC consolidated read-only endpoint (unauth -> 401, Viewer -> 200 valid JSON)
+  std::string nocUnauth = sendRawHttp(
+      port,
+      "GET /api/v1/noc/overview HTTP/1.1\r\nHost: " + hostHdr + "\r\n\r\n");
+  CHECK(nocUnauth.find("401 Unauthorized") != std::string::npos);
+
+  std::string nocResp = sendRawHttp(
+      port,
+      "GET /api/v1/noc/overview?range=24h HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nAuthorization: Bearer " + viewerTok + "\r\n\r\n");
+  CHECK(nocResp.find("200 OK") != std::string::npos);
+  const std::string nocBody = extractJsonBody(nocResp);
+  JsonValue nocJson;
+  std::string nocErr;
+  CHECK(JsonValue::parse(nocBody, nocJson, nocErr, 524288));
+  CHECK(nocJson.getString("mode") == "noc_readonly");
+  CHECK(nocJson.getBool("readOnly", false));
+  CHECK(!nocJson.getBool("aiUsed", true));
+  CHECK(nocJson.get("snapshot") != nullptr);
+  CHECK(nocJson.get("quality") != nullptr);
+  CHECK(nocJson.get("interfaces") != nullptr);
+  CHECK(nocJson.get("discovery") != nullptr);
+  CHECK(nocJson.get("intelligence") != nullptr);
+  CHECK(nocJson.get("services") != nullptr);
+  CHECK(nocJson.get("analytics") != nullptr);
+  CHECK(nocJson.get("storage") != nullptr);
+  CHECK(nocJson.get("traceHistory") != nullptr);
+
   server.stop();
   std::filesystem::remove_all(tempRoot, ec);
   std::cout << "[PASS] testLiveSecurityHttpAndWsIntegration\n";

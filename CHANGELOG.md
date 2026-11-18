@@ -2,6 +2,14 @@
 
 Todas as mudanças relevantes do **NetPulse** serão documentadas neste arquivo.
 
+## [1.11.0] - 2026-11-18 — Fase 8: Dashboard Analytics & Modo NOC
+
+### Adicionado
+- **Endpoint Consolidado Somente Leitura (`src/api/api_router.cpp`)**: `GET /api/noc/overview` (`/api/v1/noc/overview`, perfil `Viewer+`) agrega em única chamada determinística telemetria em tempo real, Network Quality, Interfaces Multi-WAN, Discovery LAN, Intelligence Determinística, Serviços Âncora, Analytics (`24h`/`7d`/`30d`), Traceroute recente e estatísticas SQLite WAL.
+- **Navegação Unificada em 12 Módulos (`static/index.html`, `static/styles.css`, `static/app.js`)**: botão `⊞ 12 Módulos` (atalho `M`) e modal `#moduleDockModal` com cards interativos e contadores ao vivo para acesso direto aos 12 módulos operacionais da plataforma.
+- **Modo NOC / TV Fullscreen Somente Leitura (`static/noc-dashboard.js`, `#nocOverlay`)**: classe `NocDashboardController` (botão `📺 NOC`, atalho `N` ou query/hash `?noc=1` / `#noc`) sem qualquer controle de mutação, com relógio em tempo real, 6 KPIs de alto contraste, gráfico Canvas2D RX/TX, matriz multi-alvo/Multi-WAN, Top Aplicações/Países, diagnóstico & serviços, alertas comportamentais, Topologia LAN ao vivo embutida, Fullscreen API (`⛶ Tela Cheia`), cadência configurável (`5s`/`10s`/`30s`) e rotação automática opcional para TV (`15s`).
+- **Testes (`tests/test_core.cpp`)**: validação HTTP/RBAC e parsing JSON estrito de `GET /api/v1/noc/overview?range=24h` em `testLiveSecurityHttpAndWsIntegration`.
+
 ## [1.10.0] - 2026-11-18 — Fase 7: Security Engine & Intelligence Determinística
 
 ### Adicionado

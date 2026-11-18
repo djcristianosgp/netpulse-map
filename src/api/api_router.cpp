@@ -3,6 +3,7 @@
 #include "../models.hpp"
 #include "../net_monitor.hpp"
 #include "../tray_host.hpp"
+#include "../version.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -1154,6 +1155,44 @@ HttpResponse ApiRouter::handleHttp(const HttpRequest& req) {
                        "security.firewall_removed", id, "allowed", "Regra de firewall removida/revertida");
     return HttpResponse{200, "application/json; charset=utf-8",
                         deps_.intelligence->getOverviewJson(), {}};
+  }
+
+  // ---- Fase 8: Dashboard Analytics & Modo NOC (Somente Leitura) ----
+  if (path == "/api/noc/overview" && method == "GET") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Viewer, auth);
+    if (err.statusCode != 200) return err;
+
+    std::string range = req.queryParam("range");
+    if (range != "24h" && range != "7d" && range != "30d") {
+      range = "24h";
+    }
+
+    const std::string snapJson = deps_.getLatestSnapshotJson ? deps_.getLatestSnapshotJson() : "";
+    const std::string qualJson = deps_.quality ? deps_.quality->getStatusJson() : "";
+    const std::string ifaceJson = deps_.interfaces ? deps_.interfaces->getSnapshotJson() : "";
+    const std::string discJson = deps_.discovery ? deps_.discovery->getDevicesJson() : "";
+    const std::string intelJson = deps_.intelligence ? deps_.intelligence->getOverviewJson(12, "", false) : "";
+    const std::string svcJson = deps_.services.getServicesJson();
+    const std::string anaJson = deps_.history.queryAnalyticsJson(range);
+    const std::string storJson = deps_.history.getStorageStatsJson();
+    const std::string traceJson = deps_.history.queryTraceHistoryJson("", 6);
+
+    std::string out = "{\"mode\":\"noc_readonly\",\"readOnly\":true,\"engineMode\":\"deterministic\",\"aiUsed\":false";
+    out += ",\"version\":"; appendJsonEscaped(out, kAppVersion);
+    out += ",\"tsMs\":" + std::to_string(nowEpochMs());
+    out += ",\"range\":"; appendJsonEscaped(out, range);
+    out += ",\"snapshot\":" + (snapJson.empty() ? "null" : snapJson);
+    out += ",\"quality\":" + (qualJson.empty() ? "null" : qualJson);
+    out += ",\"interfaces\":" + (ifaceJson.empty() ? "null" : ifaceJson);
+    out += ",\"discovery\":" + (discJson.empty() ? "null" : discJson);
+    out += ",\"intelligence\":" + (intelJson.empty() ? "null" : intelJson);
+    out += ",\"services\":" + (svcJson.empty() ? "[]" : svcJson);
+    out += ",\"analytics\":" + (anaJson.empty() ? "null" : anaJson);
+    out += ",\"storage\":" + (storJson.empty() ? "null" : storJson);
+    out += ",\"traceHistory\":" + (traceJson.empty() ? "null" : traceJson);
+    out += "}";
+    return HttpResponse{200, "application/json; charset=utf-8", std::move(out), {}};
   }
 
   if (path == "/api/alerts/toggle" && method == "POST") {

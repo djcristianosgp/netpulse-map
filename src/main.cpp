@@ -346,6 +346,7 @@ int main(int argc, char** argv) {
   ifaceMonitor.collect(nowMs());
   netpulse::DiscoveryEngine discoveryEngine(history, ifaceMonitor);
   discoveryEngine.start();
+  netpulse::IntelligenceEngine intelligenceEngine(history);
   auto syncHistoryNotifications = [&](const netpulse::AppSettings& cfg) {
     history.setAlertsEnabled(cfg.alertsEnabled);
     history.setNotificationCategories(netpulse::NotificationCategories{
@@ -427,6 +428,7 @@ int main(int argc, char** argv) {
                                                &telCopy);
         return netpulse::serializeLanTopologyJson(topo);
       },
+      &intelligenceEngine,
   });
 
   const uint64_t startMs = nowMs();
@@ -550,6 +552,7 @@ int main(int argc, char** argv) {
 
       history.processTelemetry(snap, geoDns);
       history.processServices(serviceMon.getSnapshot());
+      intelligenceEngine.processTelemetry(snap, geoDns);
       {
         std::lock_guard lock(latestSnapCopyMutex);
         latestTelemetryCopy = snap;

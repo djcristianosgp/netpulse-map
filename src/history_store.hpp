@@ -181,6 +181,65 @@ struct LanDeviceRecord {
   uint64_t seenCount = 1;
 };
 
+struct SecurityRuleRecord {
+  std::string id;
+  std::string name;
+  std::string kind;
+  bool enabled = true;
+  int riskWeight = 30;
+  double thresholdNum = 0.0;
+  std::string matchCountry;
+  uint16_t matchPort = 0;
+  std::string matchProcess;
+  std::string description;
+  bool isBuiltin = false;
+  uint64_t updatedAtMs = 0;
+};
+
+struct SecurityAlertRecord {
+  int64_t id = 0;
+  uint64_t tsMs = 0;
+  std::string ruleId;
+  std::string ruleName;
+  int riskScore = 0;
+  std::string riskLevel = "informative"; // "informative" | "low" | "moderate" | "high" | "critical"
+  std::string processName;
+  uint32_t pid = 0;
+  std::string exePath;
+  std::string destination;
+  std::string countryCode;
+  std::string whatHappened;
+  std::string evidencesJson = "[]";
+  std::string classificationReason;
+  std::string possibleActionsJson = "[]";
+  bool acknowledged = false;
+};
+
+struct SecurityListEntry {
+  std::string id;
+  std::string listKind;   // "allowlist" | "blocklist"
+  std::string targetType; // "ip" | "process" | "port"
+  std::string targetValue;
+  std::string reason;
+  std::string createdBy;
+  uint64_t createdAtMs = 0;
+};
+
+struct FirewallRuleRecord {
+  std::string id;
+  std::string ruleName;
+  std::string direction = "out"; // "out" | "in"
+  std::string action = "block";  // "block" | "allow"
+  std::string protocol = "ANY";  // "TCP" | "UDP" | "ANY"
+  std::string remoteIp;
+  uint16_t remotePort = 0;
+  std::string programPath;
+  bool osApplied = false;
+  bool enabled = true;
+  std::string createdBy;
+  uint64_t createdAtMs = 0;
+};
+
 bool isSensitivePort(uint16_t port);
 uint64_t rangeToDurationMs(const std::string& range);
 
@@ -230,6 +289,21 @@ public:
   bool upsertLanDevices(const std::vector<LanDeviceRecord>& devices, bool markOthersOffline);
   bool setLanDeviceLabel(const std::string& deviceKey, const std::string& label);
   bool deleteLanDevice(const std::string& deviceKey);
+
+  std::vector<SecurityRuleRecord> loadSecurityRules();
+  bool upsertSecurityRule(const SecurityRuleRecord& rule);
+  bool deleteSecurityRule(const std::string& id);
+  int64_t saveSecurityAlert(const SecurityAlertRecord& alert);
+  std::vector<SecurityAlertRecord> loadSecurityAlerts(size_t limit = 150,
+                                                      const std::string& levelFilter = {},
+                                                      bool unackOnly = false);
+  bool acknowledgeSecurityAlert(int64_t alertId);
+  std::vector<SecurityListEntry> loadSecurityLists();
+  bool upsertSecurityListEntry(const SecurityListEntry& entry);
+  bool deleteSecurityListEntry(const std::string& id);
+  std::vector<FirewallRuleRecord> loadFirewallRules();
+  bool upsertFirewallRule(const FirewallRuleRecord& fw);
+  bool deleteFirewallRule(const std::string& id);
 
   void flushNow();
   bool pruneNow();

@@ -906,6 +906,256 @@ HttpResponse ApiRouter::handleHttp(const HttpRequest& req) {
     return HttpResponse{200, "application/json; charset=utf-8", serializeLanTopologyJson(topo), {}};
   }
 
+  // ---- Fase 7: Deterministic Intelligence & Security Engine ----
+  if (path == "/api/intelligence/overview" && method == "GET") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Viewer, auth);
+    if (err.statusCode != 200) return err;
+    if (!deps_.intelligence) return jsonError(503, "intelligence_unavailable");
+    size_t limit = 120;
+    const std::string limitStr = req.queryParam("limit");
+    if (!limitStr.empty()) {
+      const long long v = std::strtoll(limitStr.c_str(), nullptr, 10);
+      if (v > 0 && v <= 500) limit = static_cast<size_t>(v);
+    }
+    const std::string level = req.queryParam("level");
+    const std::string unackParam = req.queryParam("unackOnly");
+    const bool unackOnly = (unackParam == "true" || unackParam == "1");
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        deps_.intelligence->getOverviewJson(limit, level, unackOnly), {}};
+  }
+
+  if (path == "/api/intelligence/ack" && method == "POST") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Operator, auth, "intelligence.ack");
+    if (err.statusCode != 200) return err;
+    if (!deps_.intelligence) return jsonError(503, "intelligence_unavailable");
+
+    JsonValue body;
+    std::string parseErr;
+    if (!JsonValue::parse(req.body, body, parseErr) || !body.isObject()) {
+      return jsonError(400, "invalid_json", parseErr);
+    }
+    const int64_t alertId = body.getInt("alertId", 0);
+    if (alertId <= 0 || !deps_.intelligence->acknowledgeAlert(alertId)) {
+      return jsonError(404, "alert_not_found");
+    }
+    deps_.audit.record(auth.actor, roleToString(auth.role), req.remoteIp,
+                       "intelligence.ack", std::to_string(alertId), "allowed", "Alerta reconhecido");
+    return HttpResponse{200, "application/json; charset=utf-8", "{\"ok\":true}", {}};
+  }
+
+  if (path == "/api/intelligence/rules" && method == "POST") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Administrator, auth, "intelligence.rule_saved");
+    if (err.statusCode != 200) return err;
+    if (!deps_.intelligence) return jsonError(503, "intelligence_unavailable");
+
+    JsonValue body;
+    std::string parseErr;
+    if (!JsonValue::parse(req.body, body, parseErr) || !body.isObject()) {
+      return jsonError(400, "invalid_json", parseErr);
+    }
+    SecurityRuleRecord rule;
+    rule.id = body.getString("id");
+    rule.name = body.getString("name");
+    rule.kind = body.getString("kind");
+    rule.enabled = body.getBool("enabled", true);
+    rule.riskWeight = static_cast<int>(body.getInt("riskWeight", 30));
+    rule.thresholdNum = body.getDouble("thresholdNum", 0.0);
+    rule.matchCountry = body.getString("matchCountry");
+    const int64_t portVal = body.getInt("matchPort", 0);
+    if (portVal < 0 || portVal > 65535) {
+      return jsonError(400, "invalid_port", "matchPort fora de 0..65535");
+    }
+    rule.matchPort = static_cast<uint16_t>(portVal);
+    rule.matchProcess = body.getString("matchProcess");
+    rule.description = body.getString("description");
+    rule.isBuiltin = false;
+
+    if (!deps_.intelligence->upsertRule(rule)) {
+      return jsonError(400, "invalid_rule", "Campos name e kind obrigatorios");
+    }
+    deps_.audit.record(auth.actor, roleToString(auth.role), req.remoteIp,
+                       "intelligence.rule_saved", rule.id, "allowed",
+                       rule.name + " (" + rule.kind + ")");
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        deps_.intelligence->getOverviewJson(), {}};
+  }
+
+  if ((path == "/api/intelligence/rules/delete" && method == "POST") ||
+      (path == "/api/intelligence/rules" && method == "DELETE")) {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Administrator, auth, "intelligence.rule_deleted");
+    if (err.statusCode != 200) return err;
+    if (!deps_.intelligence) return jsonError(503, "intelligence_unavailable");
+
+    std::string id;
+    bool confirmed = false;
+    if (method == "DELETE") {
+      id = req.queryParam("id");
+      confirmed = (req.queryParam("confirm") == "true" || req.queryParam("confirm") == "1");
+    } else {
+      JsonValue body;
+      std::string parseErr;
+      if (!JsonValue::parse(req.body, body, parseErr) || !body.isObject()) {
+        return jsonError(400, "invalid_json", parseErr);
+      }
+      id = body.getString("id");
+      confirmed = body.getBool("confirm", false);
+    }
+    if (!confirmed) {
+      return jsonError(400, "confirmation_required", "Confirmacao explicita obrigatoria");
+    }
+    if (id.empty() || !deps_.intelligence->deleteRule(id)) {
+      return jsonError(400, "rule_delete_failed", "Regra inexistente ou builtin protegida");
+    }
+    deps_.audit.record(auth.actor, roleToString(auth.role), req.remoteIp,
+                       "intelligence.rule_deleted", id, "allowed", "Regra personalizada removida");
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        deps_.intelligence->getOverviewJson(), {}};
+  }
+
+  if (path == "/api/security/lists" && method == "POST") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Operator, auth, "security.list_added");
+    if (err.statusCode != 200) return err;
+    if (!deps_.intelligence) return jsonError(503, "intelligence_unavailable");
+
+    JsonValue body;
+    std::string parseErr;
+    if (!JsonValue::parse(req.body, body, parseErr) || !body.isObject()) {
+      return jsonError(400, "invalid_json", parseErr);
+    }
+    const std::string listKind = body.getString("listKind");
+    const std::string targetType = body.getString("targetType");
+    const std::string targetValue = body.getString("targetValue");
+    const std::string reason = body.getString("reason");
+
+    SecurityListEntry created;
+    std::string actErr;
+    if (!deps_.intelligence->addListEntry(listKind, targetType, targetValue, reason, auth.actor, created, actErr)) {
+      return jsonError(400, "invalid_list_entry", actErr);
+    }
+    deps_.audit.record(auth.actor, roleToString(auth.role), req.remoteIp,
+                       "security.list_added", listKind + ":" + targetType + ":" + targetValue,
+                       "allowed", reason, true);
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        deps_.intelligence->getOverviewJson(), {}};
+  }
+
+  if ((path == "/api/security/lists/delete" && method == "POST") ||
+      (path == "/api/security/lists" && method == "DELETE")) {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Operator, auth, "security.list_removed");
+    if (err.statusCode != 200) return err;
+    if (!deps_.intelligence) return jsonError(503, "intelligence_unavailable");
+
+    std::string id;
+    bool confirmed = false;
+    if (method == "DELETE") {
+      id = req.queryParam("id");
+      confirmed = (req.queryParam("confirm") == "true" || req.queryParam("confirm") == "1");
+    } else {
+      JsonValue body;
+      std::string parseErr;
+      if (!JsonValue::parse(req.body, body, parseErr) || !body.isObject()) {
+        return jsonError(400, "invalid_json", parseErr);
+      }
+      id = body.getString("id");
+      confirmed = body.getBool("confirm", false);
+    }
+    if (!confirmed) {
+      return jsonError(400, "confirmation_required", "Confirmacao explicita obrigatoria");
+    }
+    if (id.empty() || !deps_.intelligence->removeListEntry(id)) {
+      return jsonError(404, "list_entry_not_found");
+    }
+    deps_.audit.record(auth.actor, roleToString(auth.role), req.remoteIp,
+                       "security.list_removed", id, "allowed", "Entrada removida da allowlist/blocklist");
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        deps_.intelligence->getOverviewJson(), {}};
+  }
+
+  if (path == "/api/security/firewall" && method == "POST") {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Administrator, auth, "security.firewall_created");
+    if (err.statusCode != 200) return err;
+    if (!deps_.intelligence) return jsonError(503, "intelligence_unavailable");
+
+    JsonValue body;
+    std::string parseErr;
+    if (!JsonValue::parse(req.body, body, parseErr) || !body.isObject()) {
+      return jsonError(400, "invalid_json", parseErr);
+    }
+    if (!body.getBool("confirm", false)) {
+      return jsonError(400, "confirmation_required", "Confirmacao explicita obrigatoria");
+    }
+    const std::string ruleName = body.getString("ruleName");
+    const std::string direction = body.getString("direction", "out");
+    const std::string action = body.getString("action", "block");
+    const std::string protocol = body.getString("protocol", "ANY");
+    const std::string remoteIp = body.getString("remoteIp");
+    const int64_t portVal = body.getInt("remotePort", 0);
+    if (portVal < 0 || portVal > 65535) {
+      return jsonError(400, "invalid_port", "remotePort fora de 0..65535");
+    }
+    const uint16_t remotePort = static_cast<uint16_t>(portVal);
+    const std::string programPath = body.getString("programPath");
+    const bool applyToOs = body.getBool("applyToOs", false);
+
+    FirewallRuleRecord created;
+    std::string actErr;
+    if (!deps_.intelligence->createFirewallRule(ruleName, direction, action, protocol, remoteIp, remotePort,
+                                                programPath, applyToOs, netpulse::isProcessElevated(),
+                                                auth.actor, created, actErr)) {
+      deps_.audit.record(auth.actor, roleToString(auth.role), req.remoteIp,
+                         "security.firewall_created", ruleName, "failed", actErr);
+      return jsonError(400, "firewall_rule_failed", actErr);
+    }
+    deps_.audit.record(auth.actor, roleToString(auth.role), req.remoteIp,
+                       "security.firewall_created", created.ruleName, "allowed",
+                       action + " " + direction + " " + protocol + (applyToOs ? " [OS aplicado]" : " [politica salva]"),
+                       true);
+    deps_.history.recordManualAction("warn", "Regra Firewall criada", created.ruleName);
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        deps_.intelligence->getOverviewJson(), {}};
+  }
+
+  if ((path == "/api/security/firewall/delete" && method == "POST") ||
+      (path == "/api/security/firewall" && method == "DELETE")) {
+    AuthContext auth;
+    auto err = requireAuth(req, Role::Administrator, auth, "security.firewall_removed");
+    if (err.statusCode != 200) return err;
+    if (!deps_.intelligence) return jsonError(503, "intelligence_unavailable");
+
+    std::string id;
+    bool confirmed = false;
+    if (method == "DELETE") {
+      id = req.queryParam("id");
+      confirmed = (req.queryParam("confirm") == "true" || req.queryParam("confirm") == "1");
+    } else {
+      JsonValue body;
+      std::string parseErr;
+      if (!JsonValue::parse(req.body, body, parseErr) || !body.isObject()) {
+        return jsonError(400, "invalid_json", parseErr);
+      }
+      id = body.getString("id");
+      confirmed = body.getBool("confirm", false);
+    }
+    if (!confirmed) {
+      return jsonError(400, "confirmation_required", "Confirmacao explicita obrigatoria");
+    }
+    std::string actErr;
+    if (id.empty() || !deps_.intelligence->removeFirewallRuleById(id, netpulse::isProcessElevated(), actErr)) {
+      return jsonError(400, "firewall_remove_failed", actErr.empty() ? "Regra nao encontrada" : actErr);
+    }
+    deps_.audit.record(auth.actor, roleToString(auth.role), req.remoteIp,
+                       "security.firewall_removed", id, "allowed", "Regra de firewall removida/revertida");
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        deps_.intelligence->getOverviewJson(), {}};
+  }
+
   if (path == "/api/alerts/toggle" && method == "POST") {
     AuthContext auth;
     auto err = requireAuth(req, Role::Operator, auth, "alerts.toggled");

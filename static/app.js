@@ -90,6 +90,12 @@ const state = {
     data: null,
     timer: null,
   },
+  intelligence: {
+    tab: 'alerts',
+    level: '',
+    unackOnly: false,
+    timer: null,
+  },
   auth: {
     authenticated: false,
     role: 'none',
@@ -1485,7 +1491,9 @@ async function init() {
   window.addEventListener('keydown', (e) => {
     const inInput = document.activeElement === $('searchInput');
     if (e.key === 'Escape') {
-      if (!$('topologyModal').classList.contains('hidden')) {
+      if (!$('intelligenceModal').classList.contains('hidden')) {
+        closeIntelligenceModal();
+      } else if (!$('topologyModal').classList.contains('hidden')) {
         closeTopologyModal();
       } else if (!$('discoveryModal').classList.contains('hidden')) {
         closeDiscoveryModal();
@@ -1758,6 +1766,108 @@ async function init() {
     if (e.target === $('topologyModal')) closeTopologyModal();
   });
   $('btnTopoRefresh').addEventListener('click', loadLanTopology);
+
+  $('btnIntelligence').addEventListener('click', openIntelligenceModal);
+  $('btnCloseIntelligence').addEventListener('click', closeIntelligenceModal);
+  $('intelligenceModal').addEventListener('click', (e) => {
+    if (e.target === $('intelligenceModal')) closeIntelligenceModal();
+  });
+  $('btnIntelRefresh').addEventListener('click', loadIntelligenceOverview);
+  document.querySelectorAll('#intelTabs .tab-btn[data-itab]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.intelligence.tab = btn.getAttribute('data-itab');
+      switchIntelligenceTab();
+    });
+  });
+  $('intelLevelFilter').addEventListener('change', () => {
+    state.intelligence.level = $('intelLevelFilter').value;
+    loadIntelligenceOverview();
+  });
+  $('intelUnackOnly').addEventListener('change', () => {
+    state.intelligence.unackOnly = $('intelUnackOnly').checked;
+    loadIntelligenceOverview();
+  });
+  $('intelRuleForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const payload = {
+      name: $('ruleNameInput').value.trim(),
+      kind: $('ruleKindInput').value,
+      enabled: true,
+      riskWeight: parseInt($('ruleWeightInput').value, 10) || 40,
+      thresholdNum: parseFloat($('ruleThresholdInput').value) || 0,
+      matchCountry: $('ruleCountryInput').value.trim().toUpperCase(),
+      matchPort: parseInt($('rulePortInput').value, 10) || 0,
+      matchProcess: $('ruleProcessInput').value.trim(),
+      description: 'Regra configurada pelo operador/administrador via UI',
+    };
+    const resp = await apiFetch('/api/intelligence/rules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (resp.ok) {
+      $('ruleNameInput').value = '';
+      renderIntelligenceData(await resp.json());
+    } else {
+      alert('Falha ao salvar regra (verifique permissões Administrator e campos).');
+    }
+  });
+  $('secListForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const payload = {
+      listKind: $('listKindInput').value,
+      targetType: $('listTypeInput').value,
+      targetValue: $('listValueInput').value.trim(),
+      reason: $('listReasonInput').value.trim(),
+    };
+    const resp = await apiFetch('/api/security/lists', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (resp.ok) {
+      $('listValueInput').value = '';
+      $('listReasonInput').value = '';
+      renderIntelligenceData(await resp.json());
+    } else {
+      const err = await resp.json().catch(() => ({}));
+      alert(err.message || err.error || 'Falha ao adicionar entrada.');
+    }
+  });
+  $('fwRuleForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const applyToOs = $('fwApplyOsInput').checked;
+    const ruleName = $('fwNameInput').value.trim();
+    if (!confirm(`Confirmar criação da regra de firewall "${ruleName}"${applyToOs ? ' com aplicação no Firewall do Sistema' : ' (política registrada)'}?`)) {
+      return;
+    }
+    const payload = {
+      ruleName,
+      direction: $('fwDirInput').value,
+      action: $('fwActionInput').value,
+      protocol: $('fwProtoInput').value,
+      remoteIp: $('fwIpInput').value.trim(),
+      remotePort: parseInt($('fwPortInput').value, 10) || 0,
+      programPath: $('fwProgramInput').value.trim(),
+      applyToOs,
+      confirm: true,
+    };
+    const resp = await apiFetch('/api/security/firewall', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (resp.ok) {
+      $('fwNameInput').value = '';
+      $('fwIpInput').value = '';
+      $('fwPortInput').value = '';
+      $('fwProgramInput').value = '';
+      renderIntelligenceData(await resp.json());
+    } else {
+      const err = await resp.json().catch(() => ({}));
+      alert(err.message || err.error || 'Falha ao criar regra de firewall.');
+    }
+  });
   $('btnTopoResetView').addEventListener('click', () => lanTopoCanvas.fitView());
   $('topoFilterSelect').addEventListener('change', applyTopologyView);
   $('topoSearchInput').addEventListener('input', applyTopologyView);
@@ -3054,6 +3164,240 @@ async function loadLanTopology() {
     $('topoModelNote').textContent = d.modelNote || '';
     applyTopologyView();
   } catch {}
+}
+
+function openIntelligenceModal() {
+  $('intelligenceModal').classList.remove('hidden');
+  switchIntelligenceTab();
+  loadIntelligenceOverview();
+  if (state.intelligence.timer) clearInterval(state.intelligence.timer);
+  state.intelligence.timer = setInterval(() => {
+    if (!$('intelligenceModal').classList.contains('hidden')) {
+      loadIntelligenceOverview();
+    }
+  }, 5000);
+}
+
+function closeIntelligenceModal() {
+  $('intelligenceModal').classList.add('hidden');
+  if (state.intelligence.timer) {
+    clearInterval(state.intelligence.timer);
+    state.intelligence.timer = null;
+  }
+}
+
+function switchIntelligenceTab() {
+  const t = state.intelligence.tab;
+  document.querySelectorAll('#intelTabs .tab-btn[data-itab]').forEach((b) => {
+    b.classList.toggle('active', b.getAttribute('data-itab') === t);
+  });
+  $('intelTabAlerts').classList.toggle('hidden', t !== 'alerts');
+  $('intelTabRules').classList.toggle('hidden', t !== 'rules');
+  $('intelTabLists').classList.toggle('hidden', t !== 'lists');
+  $('intelTabFirewall').classList.toggle('hidden', t !== 'firewall');
+}
+
+async function loadIntelligenceOverview() {
+  try {
+    const qs = new URLSearchParams({ limit: '120' });
+    if (state.intelligence.level) qs.set('level', state.intelligence.level);
+    if (state.intelligence.unackOnly) qs.set('unackOnly', 'true');
+    const resp = await apiFetch('/api/intelligence/overview?' + qs.toString());
+    if (!resp.ok) return;
+    renderIntelligenceData(await resp.json());
+  } catch {}
+}
+
+function renderIntelligenceData(d) {
+  const canOp = hasRole('operator');
+  const canAdmin = hasRole('administrator');
+  const level = d.overallRiskLevel || 'informative';
+  const score = Number(d.overallRiskScore || 0);
+  const badge = $('intelRiskHeaderBadge');
+  if (badge) {
+    badge.className = `risk-pill ${escHtml(level)}`;
+    badge.textContent = `RISCO ${score} · ${level.toUpperCase()}`;
+  }
+
+  const sum = d.summary || {};
+  $('intelSummaryGrid').innerHTML = `
+    <div class="ana-kpi-card"><span>Motor</span><strong>Determinístico (Sem IA)</strong></div>
+    <div class="ana-kpi-card"><span>Não Reconhecidos</span><strong>${Number(d.unacknowledgedCount || 0)}</strong></div>
+    <div class="ana-kpi-card"><span>Críticos / Altos</span><strong>${Number(sum.critical || 0)} / ${Number(sum.high || 0)}</strong></div>
+    <div class="ana-kpi-card"><span>Moderados / Baixos</span><strong>${Number(sum.moderate || 0)} / ${Number(sum.low || 0)}</strong></div>
+    <div class="ana-kpi-card"><span>Processos Base EWMA</span><strong>${Number(d.trackedProcessBaselines || 0)}</strong></div>
+  `;
+
+  if ($('intelRuleForm')) $('intelRuleForm').querySelector('button[type="submit"]').disabled = !canAdmin;
+  if ($('secListForm')) $('secListForm').querySelector('button[type="submit"]').disabled = !canOp;
+  if ($('fwRuleForm')) $('fwRuleForm').querySelector('button[type="submit"]').disabled = !canAdmin;
+
+  const alerts = d.alerts || [];
+  $('intelAlertsList').innerHTML = alerts.length === 0
+    ? '<div class="sec-row"><span class="sec-row-meta">Nenhum alerta comportamental registrado com os filtros atuais.</span></div>'
+    : alerts.map((a) => {
+      const evs = (a.evidences || []).map((e) => `• ${escHtml(e)}`).join(' &nbsp; ');
+      const destIp = (a.destination || '').split(':')[0];
+      return `
+        <div class="diag-card ${a.riskLevel === 'critical' || a.riskLevel === 'high' ? 'critical' : a.riskLevel === 'moderate' ? 'warn' : 'ok'}">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+            <div>
+              <span class="risk-pill ${escHtml(a.riskLevel)}">${escHtml(a.riskLevel)} (${Number(a.riskScore)})</span>
+              <strong>${escHtml(a.ruleName)}</strong>
+              <span class="sec-row-meta">${escHtml(a.processName || 'Host')}${a.pid ? ' #' + a.pid : ''} · ${escHtml(a.destination || '—')}</span>
+            </div>
+            <div style="display:flex;gap:5px;align-items:center">
+              <span class="sec-row-meta">${new Date(a.tsMs).toLocaleString('pt-BR')}</span>
+              ${!a.acknowledged && canOp ? `<button type="button" class="mini-pill-btn i-ack" data-id="${a.id}">✓ Reconhecer</button>` : `<span class="sec-row-meta">${a.acknowledged ? '✓ Reconhecido' : ''}</span>`}
+              ${canOp && a.processName ? `<button type="button" class="mini-pill-btn i-allow" data-proc="${escHtml(a.processName)}">Allowlist Proc</button>` : ''}
+              ${canOp && destIp && /^\d+\.\d+\.\d+\.\d+$/.test(destIp) ? `<button type="button" class="mini-pill-btn i-block" data-ip="${escHtml(destIp)}">Blocklist IP</button>` : ''}
+            </div>
+          </div>
+          <div>${escHtml(a.whatHappened)}</div>
+          <div class="sec-row-meta">${evs}</div>
+          <div class="sec-row-meta">Motivo: ${escHtml(a.classificationReason)}</div>
+        </div>`;
+    }).join('');
+
+  $('intelAlertsList').querySelectorAll('.i-ack').forEach((b) => {
+    b.addEventListener('click', async () => {
+      await apiFetch('/api/intelligence/ack', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ alertId: parseInt(b.getAttribute('data-id'), 10) }),
+      });
+      loadIntelligenceOverview();
+    });
+  });
+  $('intelAlertsList').querySelectorAll('.i-allow').forEach((b) => {
+    b.addEventListener('click', async () => {
+      const proc = b.getAttribute('data-proc');
+      await apiFetch('/api/security/lists', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ listKind: 'allowlist', targetType: 'process', targetValue: proc, reason: 'Permitido a partir do alerta UI' }),
+      });
+      loadIntelligenceOverview();
+    });
+  });
+  $('intelAlertsList').querySelectorAll('.i-block').forEach((b) => {
+    b.addEventListener('click', async () => {
+      const ip = b.getAttribute('data-ip');
+      if (!confirm(`Adicionar ${ip} à Blocklist de segurança?`)) return;
+      await apiFetch('/api/security/lists', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ listKind: 'blocklist', targetType: 'ip', targetValue: ip, reason: 'Marcado como blocklist via alerta UI' }),
+      });
+      loadIntelligenceOverview();
+    });
+  });
+
+  const rules = d.rules || [];
+  $('intelRulesList').innerHTML = rules.map((r) => `
+    <div class="sec-row">
+      <div style="min-width:0;flex:1">
+        <div>
+          <strong>${escHtml(r.name)}</strong>
+          <span class="state-pill">${escHtml(r.kind)}</span>
+          <span class="risk-pill ${r.riskWeight >= 80 ? 'critical' : r.riskWeight >= 60 ? 'high' : r.riskWeight >= 40 ? 'moderate' : 'low'}">Peso ${Number(r.riskWeight)}</span>
+          ${r.isBuiltin ? '<span class="state-pill">BUILTIN</span>' : '<span class="state-pill new">CUSTOM</span>'}
+        </div>
+        <div class="sec-row-meta">${escHtml(r.description || '')} · Limiar=${Number(r.thresholdNum || 0)}${r.matchCountry ? ' · País=' + escHtml(r.matchCountry) : ''}${r.matchPort ? ' · Porta=' + r.matchPort : ''}${r.matchProcess ? ' · Proc=' + escHtml(r.matchProcess) : ''}</div>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <button type="button" class="mini-pill-btn i-rtog" data-id="${escHtml(r.id)}" ${!canAdmin ? 'disabled' : ''}>${r.enabled ? 'Ativa ✓' : 'Inativa'}</button>
+        ${!r.isBuiltin && canAdmin ? `<button type="button" class="mini-pill-btn i-rdel" data-id="${escHtml(r.id)}">✕</button>` : ''}
+      </div>
+    </div>
+  `).join('');
+
+  $('intelRulesList').querySelectorAll('.i-rtog').forEach((b) => {
+    b.addEventListener('click', async () => {
+      const id = b.getAttribute('data-id');
+      const r = rules.find((x) => x.id === id);
+      if (!r) return;
+      const resp = await apiFetch('/api/intelligence/rules', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...r, enabled: !r.enabled }),
+      });
+      if (resp.ok) renderIntelligenceData(await resp.json());
+    });
+  });
+  $('intelRulesList').querySelectorAll('.i-rdel').forEach((b) => {
+    b.addEventListener('click', async () => {
+      const id = b.getAttribute('data-id');
+      if (!confirm('Remover regra personalizada?')) return;
+      const resp = await apiFetch('/api/intelligence/rules/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, confirm: true }),
+      });
+      if (resp.ok) renderIntelligenceData(await resp.json());
+    });
+  });
+
+  const lists = d.lists || [];
+  $('secListsContainer').innerHTML = lists.length === 0
+    ? '<div class="sec-row"><span class="sec-row-meta">Nenhuma entrada configurada em Allowlist ou Blocklist.</span></div>'
+    : lists.map((e) => `
+      <div class="sec-row">
+        <div>
+          <span class="risk-pill ${e.listKind === 'blocklist' ? 'critical' : 'low'}">${escHtml(e.listKind)}</span>
+          <span class="state-pill">${escHtml(e.targetType)}</span>
+          <strong>${escHtml(e.targetValue)}</strong>
+          <span class="sec-row-meta">${escHtml(e.reason || '')} · por ${escHtml(e.createdBy || '—')}</span>
+        </div>
+        ${canOp ? `<button type="button" class="mini-pill-btn i-ldel" data-id="${escHtml(e.id)}">✕ Remover</button>` : ''}
+      </div>
+    `).join('');
+
+  $('secListsContainer').querySelectorAll('.i-ldel').forEach((b) => {
+    b.addEventListener('click', async () => {
+      const id = b.getAttribute('data-id');
+      if (!confirm('Remover item da lista de segurança?')) return;
+      const resp = await apiFetch('/api/security/lists/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, confirm: true }),
+      });
+      if (resp.ok) renderIntelligenceData(await resp.json());
+    });
+  });
+
+  const fws = d.firewallRules || [];
+  $('fwRulesList').innerHTML = fws.length === 0
+    ? '<div class="sec-row"><span class="sec-row-meta">Nenhuma regra granular de firewall criada.</span></div>'
+    : fws.map((fw) => `
+      <div class="sec-row">
+        <div>
+          <span class="risk-pill ${fw.action === 'block' ? 'high' : 'low'}">${escHtml(fw.action)} ${escHtml(fw.direction)}</span>
+          <strong>${escHtml(fw.ruleName)}</strong>
+          <span class="state-pill">${escHtml(fw.protocol)}</span>
+          ${fw.osApplied ? '<span class="state-pill new">OS APLICADA</span>' : '<span class="state-pill">POLÍTICA DB</span>'}
+          <div class="sec-row-meta">${fw.remoteIp ? 'IP=' + escHtml(fw.remoteIp) + ' ' : ''}${fw.remotePort ? 'Porta=' + fw.remotePort + ' ' : ''}${fw.programPath ? 'Exe=' + escHtml(fw.programPath) : ''}</div>
+        </div>
+        ${canAdmin ? `<button type="button" class="mini-pill-btn i-fwdel" data-id="${escHtml(fw.id)}">↺ Reverter / Excluir</button>` : ''}
+      </div>
+    `).join('');
+
+  $('fwRulesList').querySelectorAll('.i-fwdel').forEach((b) => {
+    b.addEventListener('click', async () => {
+      const id = b.getAttribute('data-id');
+      if (!confirm('Reverter/excluir regra de firewall?')) return;
+      const resp = await apiFetch('/api/security/firewall/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, confirm: true }),
+      });
+      if (resp.ok) renderIntelligenceData(await resp.json());
+      else {
+        const err = await resp.json().catch(() => ({}));
+        alert(err.message || err.error || 'Falha ao remover regra.');
+      }
+    });
+  });
 }
 
 let updatePollTimer = null;

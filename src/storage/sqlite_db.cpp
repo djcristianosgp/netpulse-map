@@ -499,6 +499,89 @@ bool SqliteDb::runMigrations(std::string& outError) {
     if (!execLocked("COMMIT;", outError)) return false;
   }
 
+  if (currentVer < 6) {
+    if (!execLocked("BEGIN IMMEDIATE;", outError)) return false;
+    const char* m6 = R"SQL(
+      CREATE TABLE IF NOT EXISTS security_rules (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        risk_weight INTEGER NOT NULL DEFAULT 30,
+        threshold_num REAL NOT NULL DEFAULT 0,
+        match_country TEXT NOT NULL DEFAULT '',
+        match_port INTEGER NOT NULL DEFAULT 0,
+        match_process TEXT NOT NULL DEFAULT '',
+        description TEXT NOT NULL DEFAULT '',
+        is_builtin INTEGER NOT NULL DEFAULT 0,
+        updated_at_ms INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS security_alerts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts_ms INTEGER NOT NULL,
+        rule_id TEXT NOT NULL,
+        rule_name TEXT NOT NULL,
+        risk_score INTEGER NOT NULL,
+        risk_level TEXT NOT NULL,
+        process_name TEXT NOT NULL DEFAULT '',
+        pid INTEGER NOT NULL DEFAULT 0,
+        exe_path TEXT NOT NULL DEFAULT '',
+        destination TEXT NOT NULL DEFAULT '',
+        country_code TEXT NOT NULL DEFAULT '',
+        what_happened TEXT NOT NULL,
+        evidences_json TEXT NOT NULL DEFAULT '[]',
+        classification_reason TEXT NOT NULL DEFAULT '',
+        possible_actions_json TEXT NOT NULL DEFAULT '[]',
+        acknowledged INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_sec_alerts_ts ON security_alerts(ts_ms DESC);
+      CREATE INDEX IF NOT EXISTS idx_sec_alerts_level_ts ON security_alerts(risk_level, ts_ms DESC);
+
+      CREATE TABLE IF NOT EXISTS security_lists (
+        id TEXT PRIMARY KEY,
+        list_kind TEXT NOT NULL,
+        target_type TEXT NOT NULL,
+        target_value TEXT NOT NULL,
+        reason TEXT NOT NULL DEFAULT '',
+        created_by TEXT NOT NULL DEFAULT '',
+        created_at_ms INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS firewall_rules (
+        id TEXT PRIMARY KEY,
+        rule_name TEXT NOT NULL,
+        direction TEXT NOT NULL DEFAULT 'out',
+        action TEXT NOT NULL DEFAULT 'block',
+        protocol TEXT NOT NULL DEFAULT 'ANY',
+        remote_ip TEXT NOT NULL DEFAULT '',
+        remote_port INTEGER NOT NULL DEFAULT 0,
+        program_path TEXT NOT NULL DEFAULT '',
+        os_applied INTEGER NOT NULL DEFAULT 0,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_by TEXT NOT NULL DEFAULT '',
+        created_at_ms INTEGER NOT NULL DEFAULT 0
+      );
+    )SQL";
+
+    if (!execLocked(m6, outError)) {
+      std::string dummy;
+      execLocked("ROLLBACK;", dummy);
+      return false;
+    }
+
+    SqliteStmt ins6(db_, "INSERT INTO schema_migrations(version, name, applied_at_ms) VALUES(6, '006_security_intelligence', ?);");
+    ins6.bindInt64(1, static_cast<int64_t>(nowEpochMs()));
+    if (!ins6.stepDone()) {
+      outError = sqlite3_errmsg(db_);
+      std::string dummy;
+      execLocked("ROLLBACK;", dummy);
+      return false;
+    }
+
+    if (!execLocked("COMMIT;", outError)) return false;
+  }
+
   return true;
 }
 

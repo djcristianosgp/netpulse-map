@@ -4,6 +4,7 @@
 #include "../discovery/discovery_engine.hpp"
 #include "../discovery/topology_builder.hpp"
 #include "../history_store.hpp"
+#include "../intelligence/intelligence_engine.hpp"
 #include "../network/interface_monitor.hpp"
 #include "../quality/network_quality_engine.hpp"
 #include "../security/audit_log.hpp"
@@ -49,6 +50,7 @@ struct ApiDependencies {
   InterfaceMonitor* interfaces = nullptr;
   DiscoveryEngine* discovery = nullptr;
   std::function<std::string()> getLanTopologyJson = nullptr;
+  IntelligenceEngine* intelligence = nullptr;
 };
 
 class ApiRouter {

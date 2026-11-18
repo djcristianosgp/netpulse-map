@@ -2,6 +2,25 @@
 
 Todas as mudanças relevantes do **NetPulse** serão documentadas neste arquivo.
 
+## [1.10.0] - 2026-11-18 — Fase 7: Security Engine & Intelligence Determinística
+
+### Adicionado
+- **Intelligence Engine 100% Determinístico (`src/intelligence/intelligence_engine.*`, zero IA/LLM)**:
+  - Avaliação contínua por tick de telemetria (`processTelemetry`) com baseline EWMA por processo e interface global.
+  - Todos os 9 detectores comportamentais nativos (`high_connection_rate`, `unseen_country` com nota explícita de que país/geolocalização isolada não indica malícia, `unknown_destination`, `abnormal_traffic_volume`, `persistent_connection`, `traffic_pattern_shift`, `repeated_failed_connections`, `sensitive_port_usage`, `unusual_process_path`).
+  - Regras configuráveis pelo usuário (`country_watch`, `bandwidth_threshold`, `connection_duration`, `sensitive_port_watch`, `new_external_process`, `connection_burst`) com ativação, edição de limiares/pesos e exclusão controlada de regras customizadas.
+  - Índice de risco transparente em 5 níveis (`informative`, `low`, `moderate`, `high`, `critical`) com fórmula/peso, evidências técnicas, processo/PID/executável, destino e ações sugeridas.
+- **Security Engine & Reversibilidade (`src/actions.*`, `src/history_store.*`)**:
+  - Gestão persistente de Allowlist e Blocklist (`ip`, `process`, `port`).
+  - Criação e reversão de regras granulares de firewall por IP remoto, porta TCP/UDP, direção (`in`/`out`), ação (`block`/`allow`) e executável (`applyOsFirewallRule` / `removeOsFirewallRule` via `netsh advfirewall` no Windows quando elevado + validação rígida de tokens/caminhos, exigindo `"confirm": true` e registro no `AuditLog`).
+- **Migration v6 no SQLite (`src/storage/sqlite_db.cpp`)**:
+  - Novas tabelas `security_rules`, `security_alerts` (com retenção automática), `security_lists` e `firewall_rules`.
+- **API & Web UI (`src/api/api_router.*`, `static/index.html`, `static/styles.css`, `static/app.js`)**:
+  - Endpoints `/api/intelligence/overview`, `/api/intelligence/ack`, `/api/intelligence/rules*`, `/api/security/lists*` e `/api/security/firewall*` com RBAC (`Viewer` / `Operator` / `Administrator`) e CSRF.
+  - Botão `🧠 Intelligence` e modal `#intelligenceModal` com abas **Alertas & Risco**, **Regras**, **Allowlist / Blocklist** e **Firewall**.
+- **Testes (`tests/test_core.cpp`)**:
+  - Novo teste `testIntelligenceAndSecurityEngine`, verificação de `schemaVersion:6` e cobertura HTTP/RBAC/CSRF/`confirm:true` dos endpoints Fase 7 em `testLiveSecurityHttpAndWsIntegration`.
+
 ## [1.9.0] - 2026-11-18 — Fase 6: Mapa de Topologia LAN
 
 ### Adicionado

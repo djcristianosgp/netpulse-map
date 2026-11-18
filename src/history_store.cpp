@@ -834,6 +834,7 @@ bool HistoryStore::applyRetentionLocked(sqlite3* db) {
   delBefore("DELETE FROM quality_samples WHERE ts_ms < ?;");
   delBefore("DELETE FROM interface_samples WHERE ts_ms < ?;");
   delBefore("DELETE FROM trace_runs WHERE started_at_ms < ?;");
+  delBefore("DELETE FROM security_alerts WHERE ts_ms < ?;");
   delBefore("DELETE FROM lan_devices WHERE online = 0 AND custom_label = '' AND last_seen_ms < ?;");
   {
     SqliteStmt st(db, "DELETE FROM trace_hops WHERE run_id NOT IN (SELECT id FROM trace_runs);");
@@ -1426,6 +1427,8 @@ std::string HistoryStore::getStorageStatsJson() {
   int64_t traceCnt = 0;
   int64_t ifSampleCnt = 0;
   int64_t lanDevCnt = 0;
+  int64_t secAlertCnt = 0;
+  int64_t secRuleCnt = 0;
   if (db_.isOpen()) {
     db_.withLock([&](sqlite3* db) {
       SqliteStmt st(db, "SELECT COUNT(*) FROM trace_runs;");
@@ -1434,6 +1437,10 @@ std::string HistoryStore::getStorageStatsJson() {
       if (st2.valid() && st2.step() == SQLITE_ROW) ifSampleCnt = st2.colInt64(0);
       SqliteStmt st3(db, "SELECT COUNT(*) FROM lan_devices;");
       if (st3.valid() && st3.step() == SQLITE_ROW) lanDevCnt = st3.colInt64(0);
+      SqliteStmt st4(db, "SELECT COUNT(*) FROM security_alerts;");
+      if (st4.valid() && st4.step() == SQLITE_ROW) secAlertCnt = st4.colInt64(0);
+      SqliteStmt st5(db, "SELECT COUNT(*) FROM security_rules;");
+      if (st5.valid() && st5.step() == SQLITE_ROW) secRuleCnt = st5.colInt64(0);
       return true;
     });
   }
@@ -1470,6 +1477,10 @@ std::string HistoryStore::getStorageStatsJson() {
   out += std::to_string(ifSampleCnt);
   out += ",\"lanDevices\":";
   out += std::to_string(lanDevCnt);
+  out += ",\"securityAlerts\":";
+  out += std::to_string(secAlertCnt);
+  out += ",\"securityRules\":";
+  out += std::to_string(secRuleCnt);
   out += "}}";
   return out;
 }
@@ -2286,6 +2297,276 @@ bool HistoryStore::deleteLanDevice(const std::string& deviceKey) {
   return db_.withTransaction([&](sqlite3* db) {
     SqliteStmt st(db, "DELETE FROM lan_devices WHERE device_key = ?;");
     st.bindText(1, deviceKey);
+    if (!st.stepDone()) return false;
+    return sqlite3_changes(db) > 0;
+  });
+}
+
+std::vector<SecurityRuleRecord> HistoryStore::loadSecurityRules() {
+  std::vector<SecurityRuleRecord> out;
+  if (!db_.isOpen()) return out;
+  db_.withLock([&](sqlite3* db) {
+    SqliteStmt st(
+        db,
+        "SELECT id, name, kind, enabled, risk_weight, threshold_num, match_country, match_port, match_process, description, is_builtin, updated_at_ms "
+        "FROM security_rules ORDER BY is_builtin DESC, updated_at_ms ASC;");
+    while (st.valid() && st.step() == SQLITE_ROW) {
+      SecurityRuleRecord r;
+      r.id = st.colText(0);
+      r.name = st.colText(1);
+      r.kind = st.colText(2);
+      r.enabled = (st.colInt64(3) != 0);
+      r.riskWeight = static_cast<int>(std::clamp<int64_t>(st.colInt64(4), 1, 100));
+      r.thresholdNum = st.colDouble(5);
+      r.matchCountry = st.colText(6);
+      r.matchPort = static_cast<uint16_t>(std::clamp<int64_t>(st.colInt64(7), 0, 65535));
+      r.matchProcess = st.colText(8);
+      r.description = st.colText(9);
+      r.isBuiltin = (st.colInt64(10) != 0);
+      r.updatedAtMs = static_cast<uint64_t>(std::max<int64_t>(0, st.colInt64(11)));
+      out.push_back(std::move(r));
+    }
+    return true;
+  });
+  return out;
+}
+
+bool HistoryStore::upsertSecurityRule(const SecurityRuleRecord& rule) {
+  if (!db_.isOpen() || rule.id.empty() || rule.kind.empty()) return false;
+  return db_.withTransaction([&](sqlite3* db) {
+    SqliteStmt st(
+        db,
+        "INSERT INTO security_rules("
+        "  id, name, kind, enabled, risk_weight, threshold_num, match_country, match_port, match_process, description, is_builtin, updated_at_ms"
+        ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(id) DO UPDATE SET "
+        "  name=excluded.name, kind=excluded.kind, enabled=excluded.enabled, risk_weight=excluded.risk_weight,"
+        "  threshold_num=excluded.threshold_num, match_country=excluded.match_country, match_port=excluded.match_port,"
+        "  match_process=excluded.match_process, description=excluded.description, updated_at_ms=excluded.updated_at_ms;");
+    st.bindText(1, rule.id);
+    st.bindText(2, rule.name);
+    st.bindText(3, rule.kind);
+    st.bindInt64(4, rule.enabled ? 1 : 0);
+    st.bindInt64(5, static_cast<int64_t>(std::clamp(rule.riskWeight, 1, 100)));
+    st.bindDouble(6, rule.thresholdNum);
+    st.bindText(7, rule.matchCountry);
+    st.bindInt64(8, static_cast<int64_t>(rule.matchPort));
+    st.bindText(9, rule.matchProcess);
+    st.bindText(10, rule.description);
+    st.bindInt64(11, rule.isBuiltin ? 1 : 0);
+    st.bindInt64(12, static_cast<int64_t>(rule.updatedAtMs > 0 ? rule.updatedAtMs : nowEpochMs()));
+    return st.stepDone();
+  });
+}
+
+bool HistoryStore::deleteSecurityRule(const std::string& id) {
+  if (!db_.isOpen() || id.empty()) return false;
+  return db_.withTransaction([&](sqlite3* db) {
+    SqliteStmt st(db, "DELETE FROM security_rules WHERE id = ? AND is_builtin = 0;");
+    st.bindText(1, id);
+    if (!st.stepDone()) return false;
+    return sqlite3_changes(db) > 0;
+  });
+}
+
+int64_t HistoryStore::saveSecurityAlert(const SecurityAlertRecord& alert) {
+  if (!db_.isOpen() || alert.ruleId.empty()) return 0;
+  int64_t id = 0;
+  db_.withTransaction([&](sqlite3* db) {
+    SqliteStmt st(
+        db,
+        "INSERT INTO security_alerts("
+        "  ts_ms, rule_id, rule_name, risk_score, risk_level, process_name, pid, exe_path,"
+        "  destination, country_code, what_happened, evidences_json, classification_reason, possible_actions_json, acknowledged"
+        ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);");
+    st.bindInt64(1, static_cast<int64_t>(alert.tsMs > 0 ? alert.tsMs : nowEpochMs()));
+    st.bindText(2, alert.ruleId);
+    st.bindText(3, alert.ruleName);
+    st.bindInt64(4, static_cast<int64_t>(std::clamp(alert.riskScore, 0, 100)));
+    st.bindText(5, alert.riskLevel);
+    st.bindText(6, alert.processName);
+    st.bindInt64(7, static_cast<int64_t>(alert.pid));
+    st.bindText(8, alert.exePath);
+    st.bindText(9, alert.destination);
+    st.bindText(10, alert.countryCode);
+    st.bindText(11, alert.whatHappened);
+    st.bindText(12, alert.evidencesJson.empty() ? "[]" : alert.evidencesJson);
+    st.bindText(13, alert.classificationReason);
+    st.bindText(14, alert.possibleActionsJson.empty() ? "[]" : alert.possibleActionsJson);
+    st.bindInt64(15, alert.acknowledged ? 1 : 0);
+    if (!st.stepDone()) return false;
+    id = sqlite3_last_insert_rowid(db);
+    return true;
+  });
+  return id;
+}
+
+std::vector<SecurityAlertRecord> HistoryStore::loadSecurityAlerts(size_t limit,
+                                                                    const std::string& levelFilter,
+                                                                    bool unackOnly) {
+  std::vector<SecurityAlertRecord> out;
+  if (!db_.isOpen()) return out;
+  const size_t lim = std::clamp<size_t>(limit, 1, 500);
+  db_.withLock([&](sqlite3* db) {
+    std::string sql =
+        "SELECT id, ts_ms, rule_id, rule_name, risk_score, risk_level, process_name, pid, exe_path,"
+        " destination, country_code, what_happened, evidences_json, classification_reason, possible_actions_json, acknowledged "
+        "FROM security_alerts WHERE 1=1";
+    if (!levelFilter.empty()) sql += " AND risk_level = ?";
+    if (unackOnly) sql += " AND acknowledged = 0";
+    sql += " ORDER BY ts_ms DESC, id DESC LIMIT ?;";
+
+    SqliteStmt st(db, sql.c_str());
+    int idx = 1;
+    if (!levelFilter.empty()) st.bindText(idx++, levelFilter);
+    st.bindInt64(idx++, static_cast<int64_t>(lim));
+
+    while (st.valid() && st.step() == SQLITE_ROW) {
+      SecurityAlertRecord a;
+      a.id = st.colInt64(0);
+      a.tsMs = static_cast<uint64_t>(st.colInt64(1));
+      a.ruleId = st.colText(2);
+      a.ruleName = st.colText(3);
+      a.riskScore = static_cast<int>(st.colInt64(4));
+      a.riskLevel = st.colText(5);
+      a.processName = st.colText(6);
+      a.pid = static_cast<uint32_t>(std::max<int64_t>(0, st.colInt64(7)));
+      a.exePath = st.colText(8);
+      a.destination = st.colText(9);
+      a.countryCode = st.colText(10);
+      a.whatHappened = st.colText(11);
+      a.evidencesJson = st.colText(12);
+      a.classificationReason = st.colText(13);
+      a.possibleActionsJson = st.colText(14);
+      a.acknowledged = (st.colInt64(15) != 0);
+      out.push_back(std::move(a));
+    }
+    return true;
+  });
+  return out;
+}
+
+bool HistoryStore::acknowledgeSecurityAlert(int64_t alertId) {
+  if (!db_.isOpen() || alertId <= 0) return false;
+  return db_.withTransaction([&](sqlite3* db) {
+    SqliteStmt st(db, "UPDATE security_alerts SET acknowledged = 1 WHERE id = ?;");
+    st.bindInt64(1, alertId);
+    if (!st.stepDone()) return false;
+    return sqlite3_changes(db) > 0;
+  });
+}
+
+std::vector<SecurityListEntry> HistoryStore::loadSecurityLists() {
+  std::vector<SecurityListEntry> out;
+  if (!db_.isOpen()) return out;
+  db_.withLock([&](sqlite3* db) {
+    SqliteStmt st(
+        db,
+        "SELECT id, list_kind, target_type, target_value, reason, created_by, created_at_ms "
+        "FROM security_lists ORDER BY created_at_ms DESC;");
+    while (st.valid() && st.step() == SQLITE_ROW) {
+      SecurityListEntry e;
+      e.id = st.colText(0);
+      e.listKind = st.colText(1);
+      e.targetType = st.colText(2);
+      e.targetValue = st.colText(3);
+      e.reason = st.colText(4);
+      e.createdBy = st.colText(5);
+      e.createdAtMs = static_cast<uint64_t>(std::max<int64_t>(0, st.colInt64(6)));
+      out.push_back(std::move(e));
+    }
+    return true;
+  });
+  return out;
+}
+
+bool HistoryStore::upsertSecurityListEntry(const SecurityListEntry& entry) {
+  if (!db_.isOpen() || entry.id.empty() || entry.targetValue.empty()) return false;
+  return db_.withTransaction([&](sqlite3* db) {
+    SqliteStmt st(
+        db,
+        "INSERT INTO security_lists(id, list_kind, target_type, target_value, reason, created_by, created_at_ms) "
+        "VALUES(?,?,?,?,?,?,?) "
+        "ON CONFLICT(id) DO UPDATE SET list_kind=excluded.list_kind, reason=excluded.reason;");
+    st.bindText(1, entry.id);
+    st.bindText(2, entry.listKind);
+    st.bindText(3, entry.targetType);
+    st.bindText(4, entry.targetValue);
+    st.bindText(5, entry.reason);
+    st.bindText(6, entry.createdBy);
+    st.bindInt64(7, static_cast<int64_t>(entry.createdAtMs > 0 ? entry.createdAtMs : nowEpochMs()));
+    return st.stepDone();
+  });
+}
+
+bool HistoryStore::deleteSecurityListEntry(const std::string& id) {
+  if (!db_.isOpen() || id.empty()) return false;
+  return db_.withTransaction([&](sqlite3* db) {
+    SqliteStmt st(db, "DELETE FROM security_lists WHERE id = ?;");
+    st.bindText(1, id);
+    if (!st.stepDone()) return false;
+    return sqlite3_changes(db) > 0;
+  });
+}
+
+std::vector<FirewallRuleRecord> HistoryStore::loadFirewallRules() {
+  std::vector<FirewallRuleRecord> out;
+  if (!db_.isOpen()) return out;
+  db_.withLock([&](sqlite3* db) {
+    SqliteStmt st(
+        db,
+        "SELECT id, rule_name, direction, action, protocol, remote_ip, remote_port, program_path, os_applied, enabled, created_by, created_at_ms "
+        "FROM firewall_rules ORDER BY created_at_ms DESC;");
+    while (st.valid() && st.step() == SQLITE_ROW) {
+      FirewallRuleRecord f;
+      f.id = st.colText(0);
+      f.ruleName = st.colText(1);
+      f.direction = st.colText(2);
+      f.action = st.colText(3);
+      f.protocol = st.colText(4);
+      f.remoteIp = st.colText(5);
+      f.remotePort = static_cast<uint16_t>(std::clamp<int64_t>(st.colInt64(6), 0, 65535));
+      f.programPath = st.colText(7);
+      f.osApplied = (st.colInt64(8) != 0);
+      f.enabled = (st.colInt64(9) != 0);
+      f.createdBy = st.colText(10);
+      f.createdAtMs = static_cast<uint64_t>(std::max<int64_t>(0, st.colInt64(11)));
+      out.push_back(std::move(f));
+    }
+    return true;
+  });
+  return out;
+}
+
+bool HistoryStore::upsertFirewallRule(const FirewallRuleRecord& fw) {
+  if (!db_.isOpen() || fw.id.empty() || fw.ruleName.empty()) return false;
+  return db_.withTransaction([&](sqlite3* db) {
+    SqliteStmt st(
+        db,
+        "INSERT INTO firewall_rules(id, rule_name, direction, action, protocol, remote_ip, remote_port, program_path, os_applied, enabled, created_by, created_at_ms) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(id) DO UPDATE SET os_applied=excluded.os_applied, enabled=excluded.enabled;");
+    st.bindText(1, fw.id);
+    st.bindText(2, fw.ruleName);
+    st.bindText(3, fw.direction);
+    st.bindText(4, fw.action);
+    st.bindText(5, fw.protocol);
+    st.bindText(6, fw.remoteIp);
+    st.bindInt64(7, static_cast<int64_t>(fw.remotePort));
+    st.bindText(8, fw.programPath);
+    st.bindInt64(9, fw.osApplied ? 1 : 0);
+    st.bindInt64(10, fw.enabled ? 1 : 0);
+    st.bindText(11, fw.createdBy);
+    st.bindInt64(12, static_cast<int64_t>(fw.createdAtMs > 0 ? fw.createdAtMs : nowEpochMs()));
+    return st.stepDone();
+  });
+}
+
+bool HistoryStore::deleteFirewallRule(const std::string& id) {
+  if (!db_.isOpen() || id.empty()) return false;
+  return db_.withTransaction([&](sqlite3* db) {
+    SqliteStmt st(db, "DELETE FROM firewall_rules WHERE id = ?;");
+    st.bindText(1, id);
     if (!st.stepDone()) return false;
     return sqlite3_changes(db) > 0;
   });

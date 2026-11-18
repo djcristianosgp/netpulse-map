@@ -25,6 +25,7 @@ inline int closesocket(int s) { return ::close(s); }
 #include "../src/discovery/topology_builder.hpp"
 #include "../src/geo_dns.hpp"
 #include "../src/history_store.hpp"
+#include "../src/intelligence/intelligence_engine.hpp"
 #include "../src/mmdb_reader.hpp"
 #include "../src/net_monitor.hpp"
 #include "../src/network/interface_monitor.hpp"
@@ -337,6 +338,7 @@ int testLiveSecurityHttpAndWsIntegration() {
   NetworkQualityEngine quality(history);
   InterfaceMonitor ifMon(&history);
   DiscoveryEngine discovery(history, ifMon);
+  IntelligenceEngine intelligence(history);
   UpdateManager updater("1.3.0", nullptr);
 
   std::string snapJson = serializeSnapshotJson(snap, geoDns, 1000, 0, &svcMon);
@@ -344,7 +346,7 @@ int testLiveSecurityHttpAndWsIntegration() {
       auth, audit, authLimiter, svcMon, tracer, settings, history, updater,
       tempRoot / "data", false, false,
       [&]() { return snapJson; },
-      nullptr, nullptr, &quality, &ifMon, &discovery,
+      nullptr, nullptr, &quality, &ifMon, &discovery, nullptr, &intelligence,
   });
 
   WsServer server(0, tempRoot / "static", tempRoot / "assets");
@@ -695,6 +697,64 @@ int testLiveSecurityHttpAndWsIntegration() {
   CHECK(topoResp.find("\"edges\":") != std::string::npos);
   CHECK(topoResp.find("\"modelNote\":") != std::string::npos);
 
+  // 18. Fase 7 Intelligence & Security HTTP RBAC + CSRF + confirm guards
+  std::string intelOverResp = sendRawHttp(
+      port,
+      "GET /api/v1/intelligence/overview HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nAuthorization: Bearer " + viewerTok + "\r\n\r\n");
+  CHECK(intelOverResp.find("200 OK") != std::string::npos);
+  CHECK(intelOverResp.find("\"engineMode\":\"deterministic\"") != std::string::npos);
+  CHECK(intelOverResp.find("\"aiUsed\":false") != std::string::npos);
+
+  // Viewer CANNOT create rule (403)
+  std::string ruleAddBody = R"({"name":"HTTP Rule","kind":"bandwidth_threshold","riskWeight":45,"thresholdNum":15})";
+  std::string ruleViewerResp = sendRawHttp(
+      port,
+      "POST /api/v1/intelligence/rules HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nCookie: np_session=" + viewerCookie +
+          "\r\nX-CSRF-Token: " + viewerCsrf +
+          "\r\nContent-Length: " + std::to_string(ruleAddBody.size()) + "\r\n\r\n" + ruleAddBody);
+  CHECK(ruleViewerResp.find("403 Forbidden") != std::string::npos);
+
+  // Admin CAN create rule + Security firewall requires confirm:true
+  std::string ruleAdminResp = sendRawHttp(
+      port,
+      "POST /api/v1/intelligence/rules HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nCookie: np_session=" + admCookie +
+          "\r\nX-CSRF-Token: " + admCsrf +
+          "\r\nContent-Length: " + std::to_string(ruleAddBody.size()) + "\r\n\r\n" + ruleAddBody);
+  CHECK(ruleAdminResp.find("200 OK") != std::string::npos);
+  CHECK(ruleAdminResp.find("HTTP Rule") != std::string::npos);
+
+  std::string listAddBody = R"({"listKind":"allowlist","targetType":"ip","targetValue":"8.8.8.8","reason":"DNS"})";
+  std::string listAddResp = sendRawHttp(
+      port,
+      "POST /api/v1/security/lists HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nCookie: np_session=" + admCookie +
+          "\r\nX-CSRF-Token: " + admCsrf +
+          "\r\nContent-Length: " + std::to_string(listAddBody.size()) + "\r\n\r\n" + listAddBody);
+  CHECK(listAddResp.find("200 OK") != std::string::npos);
+  CHECK(listAddResp.find("8.8.8.8") != std::string::npos);
+
+  std::string fwNoConfirm = R"({"ruleName":"TestBlock","direction":"out","action":"block","protocol":"TCP","remoteIp":"203.0.113.50","remotePort":4444,"applyToOs":false})";
+  std::string fwNoConfResp = sendRawHttp(
+      port,
+      "POST /api/v1/security/firewall HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nCookie: np_session=" + admCookie +
+          "\r\nX-CSRF-Token: " + admCsrf +
+          "\r\nContent-Length: " + std::to_string(fwNoConfirm.size()) + "\r\n\r\n" + fwNoConfirm);
+  CHECK(fwNoConfResp.find("confirmation_required") != std::string::npos);
+
+  std::string fwConfirmBody = R"({"ruleName":"TestBlock","direction":"out","action":"block","protocol":"TCP","remoteIp":"203.0.113.50","remotePort":4444,"applyToOs":false,"confirm":true})";
+  std::string fwOkResp = sendRawHttp(
+      port,
+      "POST /api/v1/security/firewall HTTP/1.1\r\nHost: " + hostHdr +
+          "\r\nCookie: np_session=" + admCookie +
+          "\r\nX-CSRF-Token: " + admCsrf +
+          "\r\nContent-Length: " + std::to_string(fwConfirmBody.size()) + "\r\n\r\n" + fwConfirmBody);
+  CHECK(fwOkResp.find("200 OK") != std::string::npos);
+  CHECK(fwOkResp.find("NetPulse_TestBlock") != std::string::npos);
+
   server.stop();
   std::filesystem::remove_all(tempRoot, ec);
   std::cout << "[PASS] testLiveSecurityHttpAndWsIntegration\n";
@@ -989,7 +1049,7 @@ int testSqliteMigrationsAndTsvImport() {
     std::string stats = hist.getStorageStatsJson();
     CHECK(stats.find("\"journalMode\":\"wal\"") != std::string::npos);
     CHECK(stats.find("\"integrityOk\":true") != std::string::npos);
-    CHECK(stats.find("\"schemaVersion\":5") != std::string::npos);
+    CHECK(stats.find("\"schemaVersion\":6") != std::string::npos);
 
     std::string evJson = hist.getEventsJson(50, 0, "warn", "");
     CHECK(evJson.find("Legacy SSH") != std::string::npos);
@@ -1726,6 +1786,158 @@ int testLanTopologyBuilder() {
   return 0;
 }
 
+int testIntelligenceAndSecurityEngine() {
+  // 1. Pure helpers: risk scale & unusual paths
+  CHECK(riskLevelFromScore(0) == "informative");
+  CHECK(riskLevelFromScore(19) == "informative");
+  CHECK(riskLevelFromScore(20) == "low");
+  CHECK(riskLevelFromScore(40) == "moderate");
+  CHECK(riskLevelFromScore(60) == "high");
+  CHECK(riskLevelFromScore(80) == "critical");
+  CHECK(riskLevelFromScore(100) == "critical");
+
+  CHECK(isUnusualExecutablePath("C:\\Users\\Alice\\AppData\\Local\\Temp\\dropper.exe"));
+  CHECK(isUnusualExecutablePath("C:\\Users\\Public\\tool.exe"));
+  CHECK(isUnusualExecutablePath("/tmp/payload"));
+  CHECK(!isUnusualExecutablePath("C:\\Program Files\\Mozilla Firefox\\firefox.exe"));
+
+  std::filesystem::path dir = std::filesystem::temp_directory_path() / "netpulse_fase7_intel_test";
+  std::error_code ec;
+  std::filesystem::remove_all(dir, ec);
+
+  HistoryStore history(dir);
+  IntelligenceEngine intel(history);
+  GeoDnsService geoDns(dir / "geo.tsv");
+
+  // 2. Verify seeded deterministic rules + CRUD for user custom rule
+  const std::string initJson = intel.getOverviewJson();
+  CHECK(initJson.find("\"engineMode\":\"deterministic\"") != std::string::npos);
+  CHECK(initJson.find("\"aiUsed\":false") != std::string::npos);
+  CHECK(initJson.find("builtin-sensitive-port") != std::string::npos);
+  CHECK(!intel.deleteRule("builtin-sensitive-port")); // builtin protected
+
+  SecurityRuleRecord customRule;
+  customRule.name = "Watcher New Proc";
+  customRule.kind = "new_external_process";
+  customRule.enabled = true;
+  customRule.riskWeight = 45;
+  CHECK(intel.upsertRule(customRule));
+  CHECK(!customRule.id.empty());
+
+  // 3. Evaluate telemetry: unusual path + sensitive port (4444) + SYN_SENT flood + persistent conn
+  const uint64_t t0 = 1700001000000ULL;
+  TelemetrySnapshot snap;
+  snap.timestampMs = t0;
+  snap.nic.rxBytesPerSec = 100000.0;
+  snap.nic.txBytesPerSec = 50000.0;
+  snap.nic.activeInterfaces = 1;
+  snap.publicConnections = 5;
+
+  SocketEntry s1;
+  s1.key = "TCP:51000:198.51.100.77:4444:9001";
+  s1.protocol = "TCP";
+  s1.localIp = "192.168.1.20";
+  s1.remoteIp = "198.51.100.77";
+  s1.localPort = 51000;
+  s1.remotePort = 4444; // sensitive port
+  s1.state = "ESTABLISHED";
+  s1.pid = 9001;
+  s1.processName = "sketchy.exe";
+  s1.processPath = "C:\\Users\\Alice\\Downloads\\sketchy.exe";
+  s1.scope = IpScope::Public;
+  s1.firstSeenMs = t0 - 3600000ULL; // 1h persistent
+
+  snap.connections.push_back(s1);
+  for (int i = 0; i < 4; ++i) {
+    SocketEntry sf = s1;
+    sf.key = "TCP:" + std::to_string(51001 + i) + ":198.51.100." + std::to_string(80 + i) + ":443:9001";
+    sf.remoteIp = "198.51.100." + std::to_string(80 + i);
+    sf.remotePort = 443;
+    sf.state = "SYN_SENT";
+    snap.connections.push_back(sf);
+  }
+  ProcessBandwidth pb;
+  pb.pid = 9001;
+  pb.processName = "sketchy.exe";
+  pb.processPath = s1.processPath;
+  pb.connections = 5;
+  pb.publicConnections = 5;
+  pb.rxBps = 200000.0;
+  pb.txBps = 200000.0;
+  snap.processStats.push_back(pb);
+
+  intel.processTelemetry(snap, geoDns);
+  auto alerts = intel.getRecentAlertsSnapshot(50);
+  bool sawUnusualPath = false, sawSensPort = false, sawPersistent = false, sawSynSent = false, sawNewProc = false;
+  int64_t ackTargetId = 0;
+  for (const auto& a : alerts) {
+    if (ackTargetId == 0 && a.id > 0) ackTargetId = a.id;
+    if (a.ruleId == "builtin-unusual-path") sawUnusualPath = true;
+    if (a.ruleId == "builtin-sensitive-port") sawSensPort = true;
+    if (a.ruleId == "builtin-persistent-conn") sawPersistent = true;
+    if (a.ruleId == "builtin-failed-conns") sawSynSent = true;
+    if (a.ruleId == customRule.id) sawNewProc = true;
+  }
+  CHECK(sawUnusualPath);
+  CHECK(sawSensPort);
+  CHECK(sawPersistent);
+  CHECK(sawSynSent);
+  CHECK(sawNewProc);
+  CHECK(ackTargetId > 0);
+  CHECK(intel.acknowledgeAlert(ackTargetId));
+
+  // 4. Blocklist & Allowlist enforcement
+  SecurityListEntry blkEntry;
+  std::string listErr;
+  CHECK(intel.addListEntry("blocklist", "ip", "203.0.113.99", "C2 block test", "tester", blkEntry, listErr));
+
+  TelemetrySnapshot snap2;
+  snap2.timestampMs = t0 + 60000ULL;
+  snap2.publicConnections = 1;
+  SocketEntry sBlk;
+  sBlk.key = "TCP:52000:203.0.113.99:8443:9002";
+  sBlk.protocol = "TCP";
+  sBlk.remoteIp = "203.0.113.99";
+  sBlk.remotePort = 8443;
+  sBlk.state = "ESTABLISHED";
+  sBlk.pid = 9002;
+  sBlk.processName = "curl.exe";
+  sBlk.scope = IpScope::Public;
+  snap2.connections.push_back(sBlk);
+  intel.processTelemetry(snap2, geoDns);
+
+  alerts = intel.getRecentAlertsSnapshot(50);
+  bool sawBlockHit = false;
+  for (const auto& a : alerts) {
+    if (a.ruleId == "sys-blocklist-hit") {
+      sawBlockHit = true;
+      CHECK(a.riskLevel == "critical");
+      CHECK(a.riskScore == 90);
+    }
+  }
+  CHECK(sawBlockHit);
+
+  // 5. Granular firewall policy persistence & deletion + custom rule cleanup
+  FirewallRuleRecord fw;
+  std::string fwErr;
+  CHECK(!intel.createFirewallRule("BadRule", "out", "block", "ANY", "127.0.0.1", 0, "", false, false, "tester", fw, fwErr));
+  CHECK(intel.createFirewallRule("BlockTest203", "out", "block", "TCP", "203.0.113.99", 8443, "", false, false, "tester", fw, fwErr));
+  const std::string fullOverview = intel.getOverviewJson();
+  JsonValue parsedOverview;
+  std::string overviewErr;
+  CHECK(JsonValue::parse(fullOverview, parsedOverview, overviewErr, 262144));
+  CHECK(parsedOverview.isObject());
+  CHECK(fullOverview.find("NetPulse_BlockTest203") != std::string::npos);
+  CHECK(intel.removeFirewallRuleById(fw.id, false, fwErr));
+  CHECK(intel.removeListEntry(blkEntry.id));
+  CHECK(intel.deleteRule(customRule.id));
+
+  history.stop();
+  std::filesystem::remove_all(dir, ec);
+  std::cout << "[PASS] testIntelligenceAndSecurityEngine\n";
+  return 0;
+}
+
 int main() {
 #ifdef _WIN32
   WSADATA wsa{};
@@ -1752,6 +1964,7 @@ int main() {
   rc |= testMultiWanAndInterfaces();
   rc |= testDiscoveryEngineAndOui();
   rc |= testLanTopologyBuilder();
+  rc |= testIntelligenceAndSecurityEngine();
 
 #ifdef _WIN32
   WSACleanup();

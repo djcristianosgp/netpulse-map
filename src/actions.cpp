@@ -188,6 +188,87 @@ bool unblockIpInWindowsFirewall(const std::string& ip, bool isElevated, std::str
 #endif
 }
 
+namespace {
+bool isSafeRuleToken(const std::string& s) {
+  if (s.empty() || s.size() > 96) return false;
+  for (unsigned char c : s) {
+    if (std::isalnum(c) || c == ' ' || c == '-' || c == '_' || c == '.' || c == ':') continue;
+    return false;
+  }
+  return true;
+}
+
+bool isSafeExePath(const std::string& p) {
+  if (p.empty()) return true;
+  if (p.size() > 260) return false;
+  for (unsigned char c : p) {
+    if (c < 32 || c == '"' || c == '\'' || c == ';' || c == '&' || c == '|' || c == '<' || c == '>' || c == '`' || c == '$') {
+      return false;
+    }
+  }
+  return true;
+}
+} // namespace
+
+bool applyOsFirewallRule(const std::string& ruleName,
+                         const std::string& direction,
+                         const std::string& action,
+                         const std::string& protocol,
+                         const std::string& remoteIp,
+                         uint16_t remotePort,
+                         const std::string& programPath,
+                         bool isElevated,
+                         std::string& outError) {
+  if (!isSafeRuleToken(ruleName)) {
+    outError = "Nome de regra de firewall invalido";
+    return false;
+  }
+  if (!remoteIp.empty() && (!isValidIpAddress(remoteIp) || isLoopbackOrUnspecifiedIp(remoteIp))) {
+    outError = "IP remoto invalido ou protegido (loopback/unspecified)";
+    return false;
+  }
+  if (!isSafeExePath(programPath)) {
+    outError = "Caminho de executavel contem caracteres invalidos";
+    return false;
+  }
+  const std::string dir = (direction == "in") ? "in" : "out";
+  const std::string act = (action == "allow") ? "allow" : "block";
+  std::string proto = "ANY";
+  if (protocol == "TCP" || protocol == "tcp") proto = "TCP";
+  else if (protocol == "UDP" || protocol == "udp") proto = "UDP";
+  if (remotePort > 0 && proto == "ANY") proto = "TCP";
+
+#ifdef _WIN32
+  std::wstring params = L"advfirewall firewall add rule name=\"" + utf8ToWide(ruleName) +
+                        L"\" dir=" + utf8ToWide(dir) +
+                        L" action=" + utf8ToWide(act) +
+                        L" protocol=" + utf8ToWide(proto);
+  if (!remoteIp.empty()) params += L" remoteip=" + utf8ToWide(remoteIp);
+  if (remotePort > 0) params += L" remoteport=" + std::to_wstring(remotePort);
+  if (!programPath.empty()) params += L" program=\"" + utf8ToWide(programPath) + L"\"";
+  return runNetshFirewall(params, isElevated, outError);
+#else
+  (void)isElevated;
+  outError = "Aplicacao automatica de firewall no SO disponivel apenas no Windows neste ciclo (regra salva no banco)";
+  return false;
+#endif
+}
+
+bool removeOsFirewallRule(const std::string& ruleName, bool isElevated, std::string& outError) {
+  if (!isSafeRuleToken(ruleName)) {
+    outError = "Nome de regra invalido";
+    return false;
+  }
+#ifdef _WIN32
+  const std::wstring params = L"advfirewall firewall delete rule name=\"" + utf8ToWide(ruleName) + L"\"";
+  return runNetshFirewall(params, isElevated, outError);
+#else
+  (void)isElevated;
+  outError = "Remocao automatica de firewall no SO disponivel apenas no Windows neste ciclo";
+  return false;
+#endif
+}
+
 bool relaunchAsAdministrator() {
 #ifdef _WIN32
   wchar_t exeBuf[MAX_PATH * 2] = {};

@@ -14,7 +14,7 @@ Este roadmap organiza a evolução incremental da plataforma NetPulse em fases i
 | **Fase 4** | Multi-WAN e Interfaces de Rede (Inventário Ethernet/Wi-Fi/VPN/Virtual, gateways, DNS, RX/TX por link) | ✅ Concluída |
 | **Fase 5** | Discovery Engine (Descoberta LAN ARP/ICMP/vizinhos, OUI fabricante, inventário de dispositivos) | ✅ Concluída |
 | **Fase 6** | Mapa de Topologia LAN (Grafo interativo independente com evidência técnica de conectividade) | ✅ Concluída |
-| **Fase 7** | Security Engine & Intelligence Determinística (Regras comportamentais, índice de risco, allowlist/blocklist, firewall por app/porta) | ⏳ Próxima |
-| **Fase 8** | Dashboard Analytics & Modo NOC (Navegação em 12 módulos + TV fullscreen somente leitura) | ⏳ Planejada |
+| **Fase 7** | Security Engine & Intelligence Determinística (Regras comportamentais, índice de risco, allowlist/blocklist, firewall por app/porta) | ✅ Concluída |
+| **Fase 8** | Dashboard Analytics & Modo NOC (Navegação em 12 módulos + TV fullscreen somente leitura) | ⏳ Próxima |
 | **Fase 9** | API v1 Documentada, Prometheus `/metrics` & Notificações (Webhook, Discord, Telegram) | ⏳ Planejada |
 | **Fase 10** | Estabilização, Benchmarks, Portabilidade Linux CI, Instalador & Release | ⏳ Planejada |

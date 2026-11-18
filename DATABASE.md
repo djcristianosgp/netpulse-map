@@ -95,6 +95,13 @@ Inventário persistente de dispositivos descobertos na rede local (`PRIMARY KEY 
 - Índices: `idx_lan_devices_ip(ip)` e `idx_lan_devices_last_seen(last_seen_ms DESC)`.
 - Retenção automática limpa dispositivos offline sem `custom_label` anteriores ao cutoff.
 
+### `security_rules`, `security_alerts`, `security_lists` & `firewall_rules` (Migration v6)
+Persistência da **Intelligence Determinística** e políticas/regras do **Security Engine** (`schemaVersion=6`):
+- `security_rules`: `id` (PK), `name`, `kind` (9 detectores embutidos + 6 tipos customizáveis pelo usuário), `enabled`, `risk_weight` (`0..100`), `threshold_num`, `match_country`, `match_port`, `match_process`, `description`, `is_builtin`, `updated_at_ms`.
+- `security_alerts`: `id` (PK), `ts_ms`, `rule_id`, `rule_name`, `risk_score` (`0..100`), `risk_level` (`informative` | `low` | `moderate` | `high` | `critical`), `process_name`, `pid`, `exe_path`, `destination`, `country_code`, `what_happened`, `evidences_json`, `classification_reason`, `possible_actions_json`, `acknowledged`. Índices: `idx_sec_alerts_ts(ts_ms DESC)` e `idx_sec_alerts_level_ts(risk_level, ts_ms DESC)`. Retenção automática exclui registros anteriores ao cutoff.
+- `security_lists`: `id` (PK), `list_kind` (`allowlist` | `blocklist`), `target_type` (`ip` | `process` | `port`), `target_value`, `reason`, `created_by`, `created_at_ms`.
+- `firewall_rules`: `id` (PK), `rule_name`, `direction` (`out` | `in`), `action` (`block` | `allow`), `protocol` (`TCP` | `UDP` | `ANY`), `remote_ip`, `remote_port`, `program_path`, `os_applied`, `enabled`, `created_by`, `created_at_ms`.
+
 ---
 
 ## 4. Pipeline Assíncrono & Política de Retenção (`src/history_store.*`)

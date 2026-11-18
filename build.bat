@@ -81,6 +81,7 @@ cl /nologo /MP /std:c++20 /O2 /EHsc /W4 /utf-8 ^
   "%ROOT%src\network\interface_monitor.cpp" ^
   "%ROOT%src\discovery\discovery_engine.cpp" ^
   "%ROOT%src\discovery\topology_builder.cpp" ^
+  "%ROOT%src\intelligence\intelligence_engine.cpp" ^
   "%ROOT%src\actions.cpp" ^
   "%ROOT%src\tray_host.cpp" ^
   "%ROOT%build\sqlite3.obj" ^
@@ -115,6 +116,7 @@ cl /nologo /MP /std:c++20 /O2 /EHsc /W4 /utf-8 ^
   "%ROOT%build\obj_app\interface_monitor.obj" ^
   "%ROOT%build\obj_app\discovery_engine.obj" ^
   "%ROOT%build\obj_app\topology_builder.obj" ^
+  "%ROOT%build\obj_app\intelligence_engine.obj" ^
   "%ROOT%build\obj_app\actions.obj" ^
   "%ROOT%build\obj_app\tray_host.obj" ^
   "%ROOT%build\sqlite3.obj" ^

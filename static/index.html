@@ -26,17 +26,12 @@
       <a class="update-notes-link" id="updateNotesLink" href="#" target="_blank" rel="noopener">Notas</a>
     </div>
 
-    <div class="view-switch glass-sub" id="viewModeSwitch" title="Alternar entre suas conexões locais e a visão global intercontinental">
-      <button class="view-btn active" data-view="local">📍 Minha Conexão</button>
-      <button class="view-btn" data-view="global">🌍 Global &amp; Serviços</button>
-    </div>
-
     <div class="throughput-box">
       <div class="tp-metrics">
         <div class="tp-row rx"><span>↓ RX</span><strong id="rxRate">0 B/s</strong></div>
         <div class="tp-row tx"><span>↑ TX</span><strong id="txRate">0 B/s</strong></div>
       </div>
-      <canvas id="sparklineCanvas" width="120" height="34" title="Tráfego em tempo real (RX ciano / TX verde)"></canvas>
+      <canvas id="sparklineCanvas" width="110" height="32" title="Tráfego em tempo real (RX ciano / TX verde)"></canvas>
     </div>
 
     <div class="kpi-strip">
@@ -57,7 +52,6 @@
       <button class="ctrl-btn active" id="btnTerminator" title="Alternar sombra Dia/Noite">Dia/Noite</button>
       <button class="ctrl-btn active" id="btnArcs" title="Alternar arcos geodésicos">Arcos</button>
       <button class="ctrl-btn" id="btnLan" title="Exibir anel LAN/Local no mapa">LAN</button>
-      <button class="ctrl-btn active" id="btnSatellites" title="Camada Satellite Tracking &amp; Painel Objetos Orbitais (S)">🛰 Órbitas</button>
       <button class="ctrl-btn active" id="btnLabels" title="Alternar rótulos no mapa">Rótulos</button>
       <button class="ctrl-btn active" id="btnAnimations" title="Alternar animações do mapa">Animar</button>
 
@@ -72,21 +66,41 @@
       </select>
       <button class="ctrl-btn" id="btnPause" title="Pausar/Retomar stream (Espaço)">Pausar</button>
       <button class="ctrl-btn" id="btnReset" title="Mostrar planeta inteiro (R)">Planeta</button>
-      <button class="ctrl-btn primary" id="btnModules" title="Central dos 12 Módulos (M)">⊞ 12 Módulos</button>
-      <button class="ctrl-btn" id="btnNoc" title="Modo NOC / TV Fullscreen Somente Leitura (N)">📺 NOC</button>
-      <button class="ctrl-btn" id="btnQuality" title="Qualidade de Rede, Latência, Jitter, DNS &amp; Diagnóstico">📶 Qualidade</button>
-      <button class="ctrl-btn" id="btnTraceModal" title="Traceroute Avançado, Histórico de Rotas &amp; Diff">🧭 Rotas</button>
-      <button class="ctrl-btn" id="btnInterfaces" title="Multi-WAN &amp; Interfaces de Rede">🔌 Interfaces</button>
-      <button class="ctrl-btn" id="btnDiscovery" title="Descoberta LAN, MAC &amp; Fabricantes (OUI)">🛰 Dispositivos</button>
-      <button class="ctrl-btn" id="btnLanTopo" title="Mapa de Topologia LAN Interativo">🕸 Topologia</button>
-      <button class="ctrl-btn" id="btnIntelligence" title="Intelligence Determinística, Regras &amp; Firewall">🧠 Intelligence</button>
-      <button class="ctrl-btn" id="btnAnalytics" title="Histórico &amp; Analytics SQLite">📊 Analytics</button>
-      <button class="ctrl-btn" id="btnNotifications" title="Notificações Externas (Webhook/Discord/Telegram), OpenAPI &amp; Prometheus">🔔 Notif / API</button>
-      <button class="ctrl-btn" id="btnSecurity" title="Segurança, Tokens & Auditoria">🛡 <span id="authRoleBadge">...</span></button>
-      <button class="ctrl-btn" id="btnSettings" title="Configurações da aplicação">⚙</button>
+    </div>
+
+    <div class="hud-system-actions">
+      <button class="ctrl-btn" id="btnSecurity" title="Segurança, Tokens &amp; Auditoria">🛡 <span id="authRoleBadge">...</span></button>
+      <button class="ctrl-btn settings-btn" id="btnSettings" title="Configurações da aplicação">⚙ Config</button>
       <button class="ctrl-btn" id="btnMinimizeTray" title="Minimizar para a bandeja do sistema">🗕</button>
     </div>
   </header>
+
+  <!-- Top Module Navigation Tabs Bar -->
+  <nav class="module-nav-bar glass" id="moduleNavBar" aria-label="Navegação de Módulos NetPulse">
+    <div class="module-tabs-scroll">
+      <button type="button" class="module-tab-btn active" data-mod="global-map" title="Mapa Global 2D em tempo real">🌍 Mapa</button>
+      <button type="button" class="module-tab-btn" data-mod="connections" title="Conexões TCP/UDP ativas">🔌 Conexões <span class="nav-badge" id="navBadgeConns">0</span></button>
+      <button type="button" class="module-tab-btn" data-mod="processes" title="Consumo &amp; Processos">📈 Consumo <span class="nav-badge" id="navBadgeProcs">0</span></button>
+      <button type="button" class="module-tab-btn" data-mod="countries" title="Países &amp; GeoIP">🏳️ Países <span class="nav-badge" id="navBadgeCountries">0</span></button>
+      <button type="button" class="module-tab-btn" data-mod="services" title="Serviços &amp; Sonda TCP Global">🌐 Serviços <span class="nav-badge" id="navBadgeServices">0/0</span></button>
+
+      <div class="divider-v"></div>
+
+      <button type="button" class="module-tab-btn" id="btnQuality" data-mod="quality" title="Qualidade de Rede, Latência, Jitter, DNS &amp; Diagnóstico">📶 Qualidade</button>
+      <button type="button" class="module-tab-btn" id="btnTraceModal" data-mod="traceroute" title="Traceroute Avançado, Histórico de Rotas &amp; Diff">🧭 Rotas</button>
+      <button type="button" class="module-tab-btn" id="btnInterfaces" data-mod="interfaces" title="Multi-WAN &amp; Interfaces de Rede">🔗 Interfaces</button>
+      <button type="button" class="module-tab-btn" id="btnDiscovery" data-mod="discovery" title="Descoberta LAN, MAC &amp; Fabricantes (OUI)">📡 Dispositivos</button>
+      <button type="button" class="module-tab-btn" id="btnLanTopo" data-mod="topology" title="Mapa de Topologia LAN Interativo">🕸 Topologia</button>
+      <button type="button" class="module-tab-btn" id="btnIntelligence" data-mod="intelligence" title="Intelligence Determinística, Regras &amp; Firewall">🧠 Intelligence</button>
+      <button type="button" class="module-tab-btn" id="btnAnalytics" data-mod="analytics" title="Histórico &amp; Analytics SQLite">📊 Analytics</button>
+      <button type="button" class="module-tab-btn" id="btnNotifications" data-mod="notifications" title="Notificações Externas, Prometheus &amp; OpenAPI v1">🔔 Notif / API</button>
+      <button type="button" class="module-tab-btn sat-tab-btn active" id="btnSatellites" data-mod="satellites" title="Camada Satellite Tracking &amp; Painel Objetos Orbitais (S)">🛰 Órbitas</button>
+    </div>
+
+    <div class="module-nav-right">
+      <button type="button" class="module-tab-btn noc-tab-btn" id="btnNoc" title="Modo NOC / TV Fullscreen Somente Leitura (N)">📺 Modo NOC</button>
+    </div>
+  </nav>
 
   <!-- Left Collapsible Panel -->
   <aside class="panel-left glass" id="leftPanel">
@@ -843,22 +857,6 @@
           </form>
           <div id="fwRulesList" class="sec-list" style="max-height:44vh"></div>
         </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Central dos 12 Módulos (Fase 8) -->
-  <div id="moduleDockModal" class="modal-backdrop hidden">
-    <div class="modal-card modal-card-xl glass">
-      <div class="modal-header">
-        <span class="modal-title">⊞ Navegação Unificada — 12 Módulos NetPulse</span>
-        <div style="display:flex;align-items:center;gap:8px">
-          <button type="button" class="ctrl-btn primary" id="btnDockOpenNoc" style="height:28px">📺 Abrir Modo NOC (TV Somente Leitura)</button>
-          <button class="close-btn" id="btnCloseModuleDock" title="Fechar (Esc)">✕</button>
-        </div>
-      </div>
-      <div class="modal-body" style="max-height:80vh;overflow-y:auto">
-        <div id="moduleDockGrid" class="module-dock-grid"></div>
       </div>
     </div>
   </div>

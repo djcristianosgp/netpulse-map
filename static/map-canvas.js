@@ -152,7 +152,7 @@ export class PlanetMapCanvas {
     const leftOpen = document.body.classList.contains('left-open') && !isNarrow;
     const rightOpen = document.body.classList.contains('right-open') && !isNarrow;
     return {
-      top: 72,
+      top: 108,
       bottom: 54,
       left: leftOpen ? 372 : 24,
       right: rightOpen ? 360 : 24,

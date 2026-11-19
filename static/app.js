@@ -438,6 +438,8 @@ function updateKpisAndBanner(filteredConns) {
   $('kpiProcesses').textContent = procs.size;
   $('kpiListening').textContent = snap.stats?.listening ?? 0;
 
+  updateModuleNavBadges(snap, countries.size, procs.size);
+
   $('rxRate').textContent = formatBytesPerSec(snap.nic?.rxBps || 0);
   $('txRate').textContent = formatBytesPerSec(snap.nic?.txBps || 0);
   if (snap.version) {
@@ -1373,6 +1375,7 @@ function applySatellitePayload(payload) {
   if (state.satellites.panelOpen) {
     renderSatellitePanel();
   }
+  syncModuleNavActive();
   if (inspectedSatelliteNoradId !== null && !$('inspectorPanel').classList.contains('hidden')) {
     const sat = payload.satellites.find((s) => s.noradId === inspectedSatelliteNoradId);
     if (sat) openSatelliteInspector(sat);
@@ -1434,6 +1437,7 @@ function toggleSatellitePanel(forceState = null) {
     loadSatellitesState();
     renderSatellitePanel();
   }
+  syncModuleNavActive();
   mapCanvas.fitPlanet();
 }
 
@@ -1461,6 +1465,7 @@ function syncTabButtons() {
   document.querySelectorAll('.tab-btn[data-tab]').forEach((btn) => {
     btn.classList.toggle('active', btn.getAttribute('data-tab') === state.tab);
   });
+  syncModuleNavActive();
 }
 
 async function connectWebSocket() {
@@ -1816,8 +1821,6 @@ async function init() {
         nocController?.close();
       } else if ($('notificationsModal') && !$('notificationsModal').classList.contains('hidden')) {
         closeNotificationsModal();
-      } else if ($('moduleDockModal') && !$('moduleDockModal').classList.contains('hidden')) {
-        closeModuleDock();
       } else if (!$('intelligenceModal').classList.contains('hidden')) {
         closeIntelligenceModal();
       } else if (!$('topologyModal').classList.contains('hidden')) {
@@ -1859,8 +1862,7 @@ async function init() {
       togglePause();
     } else if (e.key === 'm' || e.key === 'M') {
       e.preventDefault();
-      if ($('moduleDockModal')?.classList.contains('hidden')) openModuleDock();
-      else closeModuleDock();
+      $('moduleNavBar')?.querySelector('.module-tab-btn')?.focus();
     } else if (e.key === 'n' || e.key === 'N') {
       e.preventDefault();
       if ($('nocOverlay')?.classList.contains('hidden')) nocController?.open(false);
@@ -2213,15 +2215,7 @@ async function init() {
   $('topoSearchInput').addEventListener('input', applyTopologyView);
 
   nocController = new NocDashboardController({ apiFetch });
-  $('btnModules').addEventListener('click', openModuleDock);
-  $('btnCloseModuleDock').addEventListener('click', closeModuleDock);
-  $('moduleDockModal').addEventListener('click', (e) => {
-    if (e.target === $('moduleDockModal')) closeModuleDock();
-  });
-  $('btnDockOpenNoc').addEventListener('click', () => {
-    closeModuleDock();
-    nocController.open(true);
-  });
+  initModuleNavBar();
   $('btnNoc').addEventListener('click', () => nocController.open(false));
 
   $('btnNotifications').addEventListener('click', openNotificationsModal);
@@ -2377,21 +2371,45 @@ async function init() {
 
 let nocController = null;
 
-function openModuleDock() {
-  renderModuleDock();
-  $('moduleDockModal').classList.remove('hidden');
-}
-
-function closeModuleDock() {
-  $('moduleDockModal').classList.add('hidden');
-}
-
-function renderModuleDock() {
-  const s = state.snapshot?.stats || {};
-  const svcs = state.snapshot?.services || [];
+function updateModuleNavBadges(snap, countryCount, procCount) {
+  const s = snap?.stats || {};
+  const svcs = snap?.services || [];
   const upSvcs = svcs.filter((x) => x.status === 'up').length;
+  if ($('navBadgeConns')) $('navBadgeConns').textContent = String(s.total ?? snap?.conns?.length ?? 0);
+  if ($('navBadgeProcs')) $('navBadgeProcs').textContent = String(procCount ?? (snap?.procs?.length || 0));
+  if ($('navBadgeCountries')) $('navBadgeCountries').textContent = String(countryCount ?? 0);
+  if ($('navBadgeServices')) $('navBadgeServices').textContent = `${upSvcs}/${svcs.length}`;
+}
+
+function syncModuleNavActive() {
+  const nav = $('moduleNavBar');
+  if (!nav) return;
+  let activeMod = 'global-map';
+  if (state.satellites.panelOpen) {
+    activeMod = 'satellites';
+  } else if (state.viewMode === 'global') {
+    activeMod = 'services';
+  } else if (document.body.classList.contains('left-open')) {
+    if (state.tab === 'conns') activeMod = 'connections';
+    else if (state.tab === 'bw') activeMod = 'processes';
+    else if (state.tab === 'countries') activeMod = 'countries';
+  }
+  nav.querySelectorAll('.module-tab-btn[data-mod]').forEach((btn) => {
+    const mod = btn.getAttribute('data-mod');
+    if (mod === 'satellites') {
+      const layerOn = state.satellites.data?.config?.enabled !== false;
+      btn.classList.toggle('active', state.satellites.panelOpen || layerOn);
+    } else {
+      btn.classList.toggle('active', mod === activeMod);
+    }
+  });
+}
+
+function initModuleNavBar() {
+  const nav = $('moduleNavBar');
+  if (!nav) return;
   const openLeftAndTab = (tabName) => {
-    closeModuleDock();
+    if (state.satellites.panelOpen) toggleSatellitePanel(false);
     switchViewMode('local');
     if (!document.body.classList.contains('left-open')) {
       document.body.classList.add('left-open');
@@ -2403,137 +2421,26 @@ function renderModuleDock() {
     renderPanel();
   };
 
-  const modules = [
-    {
-      id: 'global-map',
-      icon: '🌍',
-      title: '1. Mapa Global 2D',
-      badge: `${Number(s.publicConnections || 0)} fluxos`,
-      desc: 'Arcos geodésicos em tempo real, projeções e terminador Dia/Noite.',
-      action: () => { closeModuleDock(); switchViewMode('local'); mapCanvas.fitPlanet(true); },
-    },
-    {
-      id: 'connections',
-      icon: '🔌',
-      title: '2. Conexões Ativas',
-      badge: `${Number(s.totalConnections || 0)} sockets`,
-      desc: 'Inspeção instantânea TCP/UDP, PID, estado e filtro por escopo.',
-      action: () => openLeftAndTab('conns'),
-    },
-    {
-      id: 'processes',
-      icon: '📈',
-      title: '3. Consumo & Processos',
-      badge: `${Number((state.snapshot?.processes || []).length)} apps`,
-      desc: 'Aplicações que consomem internet e evolução RX/TX ao vivo.',
-      action: () => openLeftAndTab('bw'),
-    },
-    {
-      id: 'countries',
-      icon: '🏳️',
-      title: '4. Países & GeoIP',
-      badge: `${Number(s.countries || 0)} países`,
-      desc: 'Destinos internacionais, cidades, provedores e ASNs offline/online.',
-      action: () => openLeftAndTab('countries'),
-    },
-    {
-      id: 'services',
-      icon: '🌐',
-      title: '5. Serviços & Sonda TCP',
-      badge: `${upSvcs}/${svcs.length} UP`,
-      desc: 'Monitoramento contínuo de âncoras continentais e endpoints custom.',
-      action: () => { closeModuleDock(); switchViewMode('global'); },
-    },
-    {
-      id: 'quality',
-      icon: '📶',
-      title: '6. Qualidade de Rede',
-      badge: 'P50–P99 · Jitter',
-      desc: 'Latência contínua, jitter, packet loss, DNS RFC-1035 e diagnóstico.',
-      action: () => { closeModuleDock(); openQualityModal(); },
-    },
-    {
-      id: 'traceroute',
-      icon: '🧭',
-      title: '7. Rotas & Traceroute',
-      badge: 'Route Diff',
-      desc: 'Salto a salto com GeoIP/ASN, monitoramento agendado e diff TTL.',
-      action: () => { closeModuleDock(); openTraceModal(); },
-    },
-    {
-      id: 'interfaces',
-      icon: '🔗',
-      title: '8. Multi-WAN & Interfaces',
-      badge: 'Links & Gateways',
-      desc: 'Inventário Ethernet/Wi-Fi/VPN/Virtual, RX/TX e transições failover.',
-      action: () => { closeModuleDock(); openInterfacesModal(); },
-    },
-    {
-      id: 'discovery',
-      icon: '🛰',
-      title: '9. Descoberta LAN',
-      badge: 'ARP · OUI',
-      desc: 'Hosts na rede local, fabricantes IEEE OUI, MAC LAA e portas.',
-      action: () => { closeModuleDock(); openDiscoveryModal(); },
-    },
-    {
-      id: 'topology',
-      icon: '🕸',
-      title: '10. Topologia LAN',
-      badge: 'Grafo Evidências',
-      desc: 'Visualização hierárquica Host → NIC → Gateway/DNS → Dispositivos.',
-      action: () => { closeModuleDock(); openTopologyModal(); },
-    },
-    {
-      id: 'intelligence',
-      icon: '🧠',
-      title: '11. Intelligence & Firewall',
-      badge: 'Zero IA · Regras',
-      desc: 'Detecção comportamental determinística, allow/blocklist e firewall.',
-      action: () => { closeModuleDock(); openIntelligenceModal(); },
-    },
-    {
-      id: 'analytics',
-      icon: '📊',
-      title: '12. Histórico & Analytics',
-      badge: 'SQLite WAL',
-      desc: 'Top 10 apps/destinos/países, séries RX/TX e retenção configurável.',
-      action: () => { closeModuleDock(); openAnalyticsModal(); },
-    },
-    {
-      id: 'notifications',
-      icon: '🔔',
-      title: 'Notificações, Prometheus & API v1',
-      badge: 'OpenAPI 3.0',
-      desc: 'Canais Webhook HMAC/Discord/Telegram, /metrics e especificação API v1.',
-      action: () => { closeModuleDock(); openNotificationsModal(); },
-    },
-    {
-      id: 'satellites',
-      icon: '🛰',
-      title: 'Satellite Tracking (Objetos Orbitais)',
-      badge: 'SGP4 · ISS / Tiangong',
-      desc: 'Rastreamento orbital em tempo real, trajetórias SGP4, OMM/TLE CelesTrak e ficha técnica.',
-      action: () => { closeModuleDock(); toggleSatellitePanel(true); },
-    },
-  ];
-
-  const grid = $('moduleDockGrid');
-  grid.innerHTML = modules.map((m) => `
-    <button type="button" class="module-card" data-mod="${escHtml(m.id)}">
-      <div class="module-card-top">
-        <span>${m.icon} ${escHtml(m.title)}</span>
-        <span class="state-pill">${escHtml(m.badge)}</span>
-      </div>
-      <div class="module-card-desc">${escHtml(m.desc)}</div>
-    </button>
-  `).join('');
-
-  grid.querySelectorAll('.module-card').forEach((btn) => {
-    const id = btn.getAttribute('data-mod');
-    const mod = modules.find((x) => x.id === id);
-    if (mod) btn.addEventListener('click', mod.action);
+  nav.querySelector('[data-mod="global-map"]')?.addEventListener('click', () => {
+    if (state.satellites.panelOpen) toggleSatellitePanel(false);
+    switchViewMode('local');
+    mapCanvas.fitPlanet(true);
+    syncModuleNavActive();
   });
+  nav.querySelector('[data-mod="connections"]')?.addEventListener('click', () => openLeftAndTab('conns'));
+  nav.querySelector('[data-mod="processes"]')?.addEventListener('click', () => openLeftAndTab('bw'));
+  nav.querySelector('[data-mod="countries"]')?.addEventListener('click', () => openLeftAndTab('countries'));
+  nav.querySelector('[data-mod="services"]')?.addEventListener('click', () => {
+    if (state.satellites.panelOpen) toggleSatellitePanel(false);
+    switchViewMode('global');
+    if (!document.body.classList.contains('left-open')) {
+      document.body.classList.add('left-open');
+      $('toggleLeftBtn').textContent = '◀';
+      mapCanvas.fitPlanet();
+    }
+    syncModuleNavActive();
+  });
+  syncModuleNavActive();
 }
 
 function switchViewMode(mode) {
@@ -2550,6 +2457,7 @@ function switchViewMode(mode) {
   if (!isGlobal) $('addServiceForm').classList.add('hidden');
   closeInspector();
   mapCanvas.setViewMode(mode);
+  syncModuleNavActive();
   applyAndRender();
 }
 

@@ -209,6 +209,9 @@ std::string buildOpenApiV1SpecJson(const std::string& version) {
   // System & Auth
   addOp(out, first, "/api/health", "get", "Health", "Health check basico do motor", "Publico");
   addOp(out, first, "/api/v1/auth/login", "post", "Auth", "Autenticar via token e abrir sessao HttpOnly", "Token valido", true);
+  addOp(out, first, "/api/v1/auth/recovery/start", "post", "Auth", "Iniciar contagem de seguranca (5 min) para remover/redefinir autenticacao", "Publico");
+  addOp(out, first, "/api/v1/auth/recovery/status", "get", "Auth", "Consultar contagem restante da recuperacao de autenticacao", "Publico");
+  addOp(out, first, "/api/v1/auth/recovery/complete", "post", "Auth", "Concluir remocao/redefinicao da autenticacao apos 5 minutos", "Publico (apos 5 min)", true, true);
   addOp(out, first, "/api/v1/auth/ws-ticket", "post", "Auth", "Emitir ticket efemero unico (30s) para WebSocket", "Viewer+");
   addOp(out, first, "/api/v1/security/audit", "get", "Security", "Consultar log de auditoria operacional", "Operator+");
   addOp(out, first, "/api/v1/security/blocks", "get", "Security", "Listar IPs bloqueados no firewall", "Viewer+");

@@ -291,6 +291,90 @@ HttpResponse ApiRouter::handleHttp(const HttpRequest& req) {
     return resp;
   }
 
+  // --- Public Time-Locked Auth Recovery (5 min wait) ---
+  auto serializeRecoveryStatus = [](const AuthRecoveryStatus& st) -> std::string {
+    const uint64_t remSec = (st.remainingMs + 999ULL) / 1000ULL;
+    const uint64_t totalSec = (st.totalDelayMs + 999ULL) / 1000ULL;
+    std::string out = "{\"active\":";
+    out += (st.active ? "true" : "false");
+    out += ",\"ready\":";
+    out += (st.ready ? "true" : "false");
+    out += ",\"recoveryId\":";
+    appendJsonEscaped(out, st.recoveryId);
+    out += ",\"startedAtMs\":" + std::to_string(st.startedAtMs);
+    out += ",\"unlockAtMs\":" + std::to_string(st.unlockAtMs);
+    out += ",\"remainingSec\":" + std::to_string(remSec);
+    out += ",\"totalSec\":" + std::to_string(totalSec);
+    out.push_back('}');
+    return out;
+  };
+
+  if (path == "/api/auth/recovery/status" && method == "GET") {
+    const auto st = deps_.auth.getRecoveryStatus(req.remoteIp);
+    return HttpResponse{200, "application/json; charset=utf-8", serializeRecoveryStatus(st), {}};
+  }
+
+  if (path == "/api/auth/recovery/start" && method == "POST") {
+    const auto st = deps_.auth.startRecovery(req.remoteIp);
+    deps_.audit.record("anonymous", "none", req.remoteIp,
+                       "auth.recovery_started", st.recoveryId, "allowed",
+                       "Solicitada recuperacao de autenticacao com espera de seguranca");
+    return HttpResponse{200, "application/json; charset=utf-8", serializeRecoveryStatus(st), {}};
+  }
+
+  if (path == "/api/auth/recovery/cancel" && method == "POST") {
+    const bool cancelled = deps_.auth.cancelRecovery(req.remoteIp);
+    if (cancelled) {
+      deps_.audit.record("anonymous", "none", req.remoteIp,
+                         "auth.recovery_cancelled", "recovery", "allowed",
+                         "Recuperacao de autenticacao cancelada");
+    }
+    return HttpResponse{200, "application/json; charset=utf-8",
+                        std::string("{\"ok\":true,\"cancelled\":") + (cancelled ? "true" : "false") + "}", {}};
+  }
+
+  if (path == "/api/auth/recovery/complete" && method == "POST") {
+    JsonValue body;
+    std::string parseErr;
+    if (!JsonValue::parse(req.body, body, parseErr) || !body.isObject()) {
+      return jsonError(400, "invalid_json", parseErr);
+    }
+    if (!body.getBool("confirm", false)) {
+      return jsonError(400, "confirmation_required", "Confirmacao explicita obrigatoria");
+    }
+    const std::string recoveryId = body.getString("recoveryId");
+    std::string newAdminToken;
+    std::string recErr;
+    auto sess = deps_.auth.completeRecovery(recoveryId, req.remoteIp, newAdminToken, recErr);
+    if (!sess.has_value()) {
+      deps_.audit.record("anonymous", "none", req.remoteIp,
+                         "auth.recovery_denied", recoveryId, "denied", recErr);
+      const int code = (recErr.rfind("recovery_wait_required:", 0) == 0) ? 403 : 400;
+      return jsonError(code, recErr, "Aguarde o termino da contagem de 5 minutos para remover a autenticacao");
+    }
+
+    deps_.authRateLimiter.reset("login:" + req.remoteIp);
+    deps_.audit.record(sess->actorLabel, roleToString(sess->role), req.remoteIp,
+                       "auth.recovery_completed", "auth_reset", "allowed",
+                       "Tokens anteriores revogados e novo acesso Administrador emitido apos espera de 5 minutos");
+
+    HttpResponse resp;
+    resp.statusCode = 200;
+    resp.extraHeaders.emplace_back("Set-Cookie", buildSessionCookie(sess->sessionId, req.isTls, 30 * 24 * 3600));
+    resp.body = "{\"ok\":true,\"role\":\"";
+    resp.body += roleToString(sess->role);
+    resp.body += "\",\"actor\":";
+    appendJsonEscaped(resp.body, sess->actorLabel);
+    resp.body += ",\"csrfToken\":";
+    appendJsonEscaped(resp.body, sess->csrfToken);
+    resp.body += ",\"newToken\":";
+    appendJsonEscaped(resp.body, newAdminToken);
+    resp.body += ",\"expiresAt\":";
+    resp.body += std::to_string(sess->expiresAtMs);
+    resp.body.push_back('}');
+    return resp;
+  }
+
   // --- Authenticated Endpoints ---
   if (path == "/api/auth/logout" && method == "POST") {
     AuthContext auth;

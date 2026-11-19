@@ -71,6 +71,16 @@ struct AuthContext {
   uint64_t expiresAtMs = 0;
 };
 
+struct AuthRecoveryStatus {
+  bool active = false;
+  bool ready = false;
+  std::string recoveryId;
+  uint64_t startedAtMs = 0;
+  uint64_t unlockAtMs = 0;
+  uint64_t remainingMs = 0;
+  uint64_t totalDelayMs = 5ULL * 60ULL * 1000ULL;
+};
+
 class AuthManager {
 public:
   explicit AuthManager(std::filesystem::path dataDir, std::string envAdminToken = {});
@@ -110,6 +120,16 @@ public:
   std::string initialBootstrapHintPath() const;
   bool hasInitialBootstrapFile() const;
 
+  // Time-locked authentication recovery (default 5 minutes, enforced server-side).
+  void setRecoveryDelayMs(uint64_t delayMs);
+  AuthRecoveryStatus startRecovery(const std::string& sourceIp);
+  AuthRecoveryStatus getRecoveryStatus(const std::string& sourceIp) const;
+  bool cancelRecovery(const std::string& sourceIp);
+  std::optional<SessionInfo> completeRecovery(const std::string& recoveryId,
+                                              const std::string& sourceIp,
+                                              std::string& outNewAdminToken,
+                                              std::string& outError);
+
 private:
   void ensureBootstrapAdminToken(const std::string& envAdminToken);
   void loadTokensLocked();
@@ -139,6 +159,15 @@ private:
     uint64_t expiresAtMs = 0;
   };
   std::unordered_map<std::string, WsTicket> wsTickets_;
+  struct PendingRecovery {
+    std::string recoveryId;
+    std::string sourceIp;
+    uint64_t startedAtMs = 0;
+    uint64_t unlockAtMs = 0;
+    uint64_t expiresAtMs = 0;
+  };
+  std::unordered_map<std::string, PendingRecovery> recoveriesByIp_;
+  uint64_t recoveryDelayMs_ = 5ULL * 60ULL * 1000ULL;
   uint64_t nextTokenSeq_ = 1;
 };
 

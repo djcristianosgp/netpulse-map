@@ -148,6 +148,86 @@ function updateAuthUi() {
   if ($('btnSettings')) $('btnSettings').disabled = !state.auth.authenticated;
 }
 
+let authRecoveryTimer = null;
+let authRecoveryState = { active: false, ready: false, recoveryId: '', remainingSec: 0, totalSec: 300 };
+
+function formatCountdownMMSS(totalSec) {
+  const s = Math.max(0, Math.floor(totalSec || 0));
+  const mm = String(Math.floor(s / 60)).padStart(2, '0');
+  const ss = String(s % 60).padStart(2, '0');
+  return `${mm}:${ss}`;
+}
+
+function stopAuthRecoveryPolling() {
+  if (authRecoveryTimer) {
+    clearInterval(authRecoveryTimer);
+    authRecoveryTimer = null;
+  }
+}
+
+function renderAuthRecoveryUi(st) {
+  authRecoveryState = st || { active: false, ready: false, recoveryId: '', remainingSec: 0, totalSec: 300 };
+  const box = $('authRecoveryBox');
+  const timerPill = $('authRecoveryTimer');
+  const bar = $('authRecoveryBar');
+  const completeBtn = $('btnCompleteRecovery');
+  const desc = $('authRecoveryDesc');
+  if (!box) return;
+
+  if (!authRecoveryState.active) {
+    box.classList.add('hidden');
+    stopAuthRecoveryPolling();
+    return;
+  }
+
+  box.classList.remove('hidden');
+  const rem = Math.max(0, Number(authRecoveryState.remainingSec || 0));
+  const total = Math.max(1, Number(authRecoveryState.totalSec || 300));
+  const pct = Math.max(0, Math.min(100, Math.round(((total - rem) / total) * 100)));
+
+  if (bar) bar.style.width = `${pct}%`;
+  if (authRecoveryState.ready || rem === 0) {
+    if (timerPill) {
+      timerPill.textContent = 'LIBERADO';
+      timerPill.className = 'state-pill new';
+    }
+    if (desc) {
+      desc.textContent = 'Contagem concluída! Clique abaixo para remover a autenticação anterior e liberar o acesso como Administrador.';
+    }
+    if (completeBtn) {
+      completeBtn.disabled = false;
+      completeBtn.textContent = '🔓 Remover autenticação';
+    }
+  } else {
+    const mmss = formatCountdownMMSS(rem);
+    if (timerPill) {
+      timerPill.textContent = mmss;
+      timerPill.className = 'state-pill syn';
+    }
+    if (desc) {
+      desc.textContent = `Por segurança, aguarde ${mmss} para habilitar a remoção da autenticação atual e gerar um novo acesso administrador.`;
+    }
+    if (completeBtn) {
+      completeBtn.disabled = true;
+      completeBtn.textContent = `Aguarde ${mmss}...`;
+    }
+  }
+}
+
+async function pollAuthRecoveryStatus() {
+  try {
+    const resp = await fetch('/api/auth/recovery/status', { credentials: 'same-origin' });
+    if (!resp.ok) return;
+    const st = await resp.json();
+    renderAuthRecoveryUi(st);
+    if (st.active && !st.ready && !authRecoveryTimer) {
+      authRecoveryTimer = setInterval(pollAuthRecoveryStatus, 1000);
+    } else if ((!st.active || st.ready) && authRecoveryTimer) {
+      stopAuthRecoveryPolling();
+    }
+  } catch {}
+}
+
 function showAuthModal(errText = '') {
   const modal = $('authModal');
   if (!modal) return;
@@ -160,10 +240,12 @@ function showAuthModal(errText = '') {
     fb.classList.add('hidden');
   }
   modal.classList.remove('hidden');
+  pollAuthRecoveryStatus();
   setTimeout(() => $('authTokenInput')?.focus(), 50);
 }
 
 function hideAuthModal() {
+  stopAuthRecoveryPolling();
   $('authModal')?.classList.add('hidden');
 }
 
@@ -1533,7 +1615,71 @@ async function connectWebSocket() {
   };
 }
 
+function updateSplash(pct, statusText, updateText = null, isUpdateAvailable = false) {
+  const bar = $('splashProgressBar');
+  const st = $('splashStatusText');
+  const up = $('splashUpdateText');
+  if (bar && typeof pct === 'number') bar.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+  if (st && statusText) st.textContent = statusText;
+  if (up && updateText !== null) {
+    up.textContent = updateText;
+    up.classList.toggle('has-update', !!isUpdateAvailable);
+  }
+}
+
+function hideSplash(delayMs = 260) {
+  const el = $('splashScreen');
+  if (!el || el.classList.contains('fade-out')) return;
+  setTimeout(() => {
+    el.classList.add('fade-out');
+    setTimeout(() => el.classList.add('hidden'), 380);
+  }, delayMs);
+}
+
+async function checkUpdatesOnStartup() {
+  if (!state.auth.authenticated) return null;
+  updateSplash(82, 'Verificando novas atualizações...', 'Consultando GitHub Releases...');
+  try {
+    // Trigger check if operator/admin and not already checked
+    const stResp = await apiFetch('/api/update/status');
+    let u = stResp.ok ? await stResp.json() : null;
+    if (u && u.state === 'idle' && hasRole('operator')) {
+      await apiFetch('/api/update/check', { method: 'POST' }).catch(() => {});
+    }
+    // Wait briefly (up to 1.8s) for check completion so splash reflects real result without blocking offline boot
+    const deadline = Date.now() + 1800;
+    while (Date.now() < deadline) {
+      const r = await apiFetch('/api/update/status');
+      if (r.ok) {
+        u = await r.json();
+        renderUpdateStatus(u);
+        if (u.state !== 'checking' && u.state !== 'idle') break;
+      } else {
+        break;
+      }
+      await new Promise((res) => setTimeout(res, 220));
+    }
+    if (u) {
+      renderUpdateStatus(u);
+      if (u.state === 'available') {
+        updateSplash(100, 'Pronto!', `Nova versão v${u.latestVersion} disponível!`, true);
+      } else if (u.state === 'up_to_date') {
+        updateSplash(100, 'Pronto!', `Atualizado (v${u.currentVersion})`);
+      } else if (u.state === 'checking') {
+        updateSplash(100, 'Pronto!', 'Verificação de atualizações em segundo plano...');
+      } else {
+        updateSplash(100, 'Pronto!', 'Verificação offline — operando localmente');
+      }
+    }
+    return u;
+  } catch {
+    updateSplash(100, 'Pronto!', 'Verificação em segundo plano');
+    return null;
+  }
+}
+
 async function init() {
+  updateSplash(22, 'Carregando mapa planetário offline...', 'Aguardando inicialização...');
   // Load bundled offline Natural Earth 110m world vector map
   try {
     const resp = await fetch('/assets/countries-110m.json');
@@ -1541,8 +1687,10 @@ async function init() {
     const features = decodeTopoJson(topo, 'countries');
     mapCanvas.setFeatures(features);
     mapCanvas.start();
+    updateSplash(45, 'Mapa carregado · Autenticando sessão...');
   } catch (err) {
     $('engineStatus').textContent = `Erro ao carregar mapa: ${err.message}`;
+    updateSplash(45, 'Inicializando interface...');
   }
 
   // UI Event Bindings
@@ -2291,7 +2439,7 @@ async function init() {
       updateAuthUi();
       await loadInitialSettings();
       connectWebSocket();
-      pollUpdateStatus();
+      checkUpdatesOnStartup();
       const qs = new URLSearchParams(window.location.search);
       if (qs.get('noc') === '1' || window.location.hash === '#noc') {
         nocController?.open(false);
@@ -2299,6 +2447,77 @@ async function init() {
     } catch {
       fb.textContent = 'Falha ao autenticar no motor local.';
       fb.classList.remove('hidden');
+    }
+  });
+
+  $('btnForgotToken')?.addEventListener('click', async () => {
+    const fb = $('authFeedback');
+    fb.classList.add('hidden');
+    try {
+      const resp = await fetch('/api/auth/recovery/start', {
+        method: 'POST',
+        credentials: 'same-origin',
+      });
+      if (resp.ok) {
+        const st = await resp.json();
+        renderAuthRecoveryUi(st);
+        if (st.active && !st.ready && !authRecoveryTimer) {
+          authRecoveryTimer = setInterval(pollAuthRecoveryStatus, 1000);
+        }
+      }
+    } catch {
+      fb.textContent = 'Falha ao iniciar recuperação no motor local.';
+      fb.classList.remove('hidden');
+    }
+  });
+
+  $('btnCancelRecovery')?.addEventListener('click', async () => {
+    try {
+      await fetch('/api/auth/recovery/cancel', {
+        method: 'POST',
+        credentials: 'same-origin',
+      });
+    } catch {}
+    renderAuthRecoveryUi({ active: false });
+  });
+
+  $('btnCompleteRecovery')?.addEventListener('click', async () => {
+    if (!authRecoveryState.active || !authRecoveryState.ready) return;
+    if (!confirm('Remover a autenticação atual (revogar tokens antigos) e entrar como Administrador?')) return;
+    const fb = $('authFeedback');
+    const btn = $('btnCompleteRecovery');
+    btn.disabled = true;
+    try {
+      const resp = await fetch('/api/auth/recovery/complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ recoveryId: authRecoveryState.recoveryId, confirm: true }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        fb.textContent = data.message || data.error || 'Aguarde o término da contagem de 5 minutos.';
+        fb.classList.remove('hidden');
+        pollAuthRecoveryStatus();
+        return;
+      }
+      renderAuthRecoveryUi({ active: false });
+      state.auth.authenticated = true;
+      state.auth.role = data.role || 'administrator';
+      state.auth.actor = data.actor || 'recovered-admin';
+      state.auth.csrfToken = data.csrfToken || '';
+      hideAuthModal();
+      updateAuthUi();
+      await loadInitialSettings();
+      connectWebSocket();
+      checkUpdatesOnStartup();
+      if (data.newToken) {
+        alert(`Autenticação redefinida com sucesso!\n\nNovo token de Administrador (também salvo em data/initial_admin_token.txt):\n${data.newToken}`);
+      }
+    } catch {
+      fb.textContent = 'Falha ao concluir recuperação.';
+      fb.classList.remove('hidden');
+      btn.disabled = false;
     }
   });
 
@@ -2359,12 +2578,17 @@ async function init() {
 
   const authed = await ensureAuthenticated();
   if (authed) {
+    updateSplash(68, 'Carregando configurações e telemetria...');
     await loadInitialSettings();
     connectWebSocket();
+    await checkUpdatesOnStartup();
+    hideSplash(320);
     const qs = new URLSearchParams(window.location.search);
     if (qs.get('noc') === '1' || window.location.hash === '#noc') {
       nocController?.open(false);
     }
+  } else {
+    hideSplash(0);
   }
   initUpdateMonitor();
 }

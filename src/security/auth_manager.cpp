@@ -561,4 +561,142 @@ bool AuthManager::hasInitialBootstrapFile() const {
   return std::filesystem::exists(bootstrapHintPath_, ec);
 }
 
+void AuthManager::setRecoveryDelayMs(uint64_t delayMs) {
+  std::lock_guard lock(mutex_);
+  recoveryDelayMs_ = delayMs;
+}
+
+AuthRecoveryStatus AuthManager::startRecovery(const std::string& sourceIp) {
+  std::lock_guard lock(mutex_);
+  const uint64_t now = nowEpochMs();
+  const std::string key = sourceIp.empty() ? "unknown" : sourceIp;
+
+  auto it = recoveriesByIp_.find(key);
+  if (it != recoveriesByIp_.end() && it->second.expiresAtMs > now) {
+    AuthRecoveryStatus st;
+    st.active = true;
+    st.recoveryId = it->second.recoveryId;
+    st.startedAtMs = it->second.startedAtMs;
+    st.unlockAtMs = it->second.unlockAtMs;
+    st.totalDelayMs = recoveryDelayMs_;
+    st.remainingMs = (it->second.unlockAtMs > now) ? (it->second.unlockAtMs - now) : 0;
+    st.ready = (st.remainingMs == 0);
+    return st;
+  }
+
+  PendingRecovery rec;
+  rec.recoveryId = "rec_" + generateRandomHex(16);
+  rec.sourceIp = key;
+  rec.startedAtMs = now;
+  rec.unlockAtMs = now + recoveryDelayMs_;
+  rec.expiresAtMs = rec.unlockAtMs + (15ULL * 60ULL * 1000ULL);
+  recoveriesByIp_[key] = rec;
+
+  AuthRecoveryStatus st;
+  st.active = true;
+  st.recoveryId = rec.recoveryId;
+  st.startedAtMs = rec.startedAtMs;
+  st.unlockAtMs = rec.unlockAtMs;
+  st.totalDelayMs = recoveryDelayMs_;
+  st.remainingMs = recoveryDelayMs_;
+  st.ready = (recoveryDelayMs_ == 0);
+  return st;
+}
+
+AuthRecoveryStatus AuthManager::getRecoveryStatus(const std::string& sourceIp) const {
+  std::lock_guard lock(mutex_);
+  AuthRecoveryStatus st;
+  st.totalDelayMs = recoveryDelayMs_;
+  const uint64_t now = nowEpochMs();
+  const std::string key = sourceIp.empty() ? "unknown" : sourceIp;
+
+  auto it = recoveriesByIp_.find(key);
+  if (it == recoveriesByIp_.end() || it->second.expiresAtMs <= now) {
+    return st;
+  }
+
+  st.active = true;
+  st.recoveryId = it->second.recoveryId;
+  st.startedAtMs = it->second.startedAtMs;
+  st.unlockAtMs = it->second.unlockAtMs;
+  st.remainingMs = (it->second.unlockAtMs > now) ? (it->second.unlockAtMs - now) : 0;
+  st.ready = (st.remainingMs == 0);
+  return st;
+}
+
+bool AuthManager::cancelRecovery(const std::string& sourceIp) {
+  std::lock_guard lock(mutex_);
+  const std::string key = sourceIp.empty() ? "unknown" : sourceIp;
+  return recoveriesByIp_.erase(key) > 0;
+}
+
+std::optional<SessionInfo> AuthManager::completeRecovery(const std::string& recoveryId,
+                                                         const std::string& sourceIp,
+                                                         std::string& outNewAdminToken,
+                                                         std::string& outError) {
+  std::lock_guard lock(mutex_);
+  outNewAdminToken.clear();
+  outError.clear();
+
+  const uint64_t now = nowEpochMs();
+  const std::string key = sourceIp.empty() ? "unknown" : sourceIp;
+  auto it = recoveriesByIp_.find(key);
+  if (it == recoveriesByIp_.end() || it->second.expiresAtMs <= now) {
+    if (it != recoveriesByIp_.end()) recoveriesByIp_.erase(it);
+    outError = "recovery_not_active";
+    return std::nullopt;
+  }
+  if (!constantTimeEquals(it->second.recoveryId, recoveryId)) {
+    outError = "invalid_recovery_id";
+    return std::nullopt;
+  }
+  if (now < it->second.unlockAtMs) {
+    const uint64_t remSec = (it->second.unlockAtMs - now + 999ULL) / 1000ULL;
+    outError = "recovery_wait_required:" + std::to_string(remSec);
+    return std::nullopt;
+  }
+
+  // Consume recovery request
+  recoveriesByIp_.erase(it);
+
+  // Revoke all previous tokens & sessions
+  for (auto& t : tokens_) {
+    t.revoked = true;
+  }
+  sessions_.clear();
+  wsTickets_.clear();
+
+  // Issue fresh bootstrap administrator token
+  const std::string raw = "np_adm_" + generateRandomHex(24);
+  ApiTokenRecord rec;
+  rec.id = "tok-" + std::to_string(nextTokenSeq_++);
+  rec.label = "recovered-admin";
+  rec.prefix = raw.substr(0, 12);
+  rec.role = Role::Administrator;
+  rec.saltHex = generateRandomHex(16);
+  rec.hashHex = hashWithSalt(rec.saltHex, raw);
+  rec.createdAtMs = now;
+  rec.expiresAtMs = 0;
+  rec.lastUsedMs = now;
+  const std::string newTokId = rec.id;
+  tokens_.push_back(std::move(rec));
+  saveTokensLocked();
+
+  std::error_code ec;
+  std::filesystem::create_directories(bootstrapHintPath_.parent_path(), ec);
+  std::ofstream hint(bootstrapHintPath_, std::ios::trunc);
+  if (hint.is_open()) {
+    hint << raw << '\n';
+    hint.close();
+#ifndef _WIN32
+    chmod(bootstrapHintPath_.c_str(), 0600);
+#endif
+  }
+
+  outNewAdminToken = raw;
+  // Create a long-lived Administrator session (30 days) so the user is logged in immediately
+  return createSessionLocked("recovered-admin", newTokId, Role::Administrator, sourceIp,
+                             30ULL * 24ULL * 3600ULL * 1000ULL);
+}
+
 } // namespace netpulse

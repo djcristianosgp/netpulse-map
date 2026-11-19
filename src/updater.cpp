@@ -550,8 +550,8 @@ UpdateManager::~UpdateManager() {
 void UpdateManager::startAutoCheck() {
   if (running_.exchange(true)) return;
   autoThread_ = std::jthread([this](std::stop_token st) {
-    // Wait 2.5s after startup before checking so initial telemetry loads first.
-    for (int i = 0; i < 25 && !st.stop_requested(); ++i) {
+    // Brief delay so HTTP server binds immediately, then check updates right at startup.
+    for (int i = 0; i < 2 && !st.stop_requested(); ++i) {
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     while (!st.stop_requested()) {

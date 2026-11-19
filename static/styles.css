@@ -38,6 +38,167 @@ html, body {
   display: block;
 }
 
+/* Startup Splash Screen */
+.splash-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle at 50% 42%, rgba(14, 116, 144, 0.28), #030712 68%);
+  transition: opacity 0.35s ease, visibility 0.35s ease;
+}
+
+.splash-screen.fade-out {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.splash-card {
+  width: min(420px, 90vw);
+  padding: 28px 26px 24px;
+  border-radius: 18px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 10px;
+  border-color: rgba(34, 211, 238, 0.34);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.72), 0 0 40px rgba(34, 211, 238, 0.12);
+}
+
+.splash-logo-wrap {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 4px;
+}
+
+.splash-ring {
+  position: absolute;
+  border-radius: 50%;
+  border: 2px solid transparent;
+}
+
+.splash-ring-outer {
+  inset: 0;
+  border-top-color: #22d3ee;
+  border-right-color: rgba(34, 211, 238, 0.35);
+  animation: splashSpin 1.8s linear infinite;
+}
+
+.splash-ring-inner {
+  inset: 10px;
+  border-bottom-color: #10b981;
+  border-left-color: rgba(16, 185, 129, 0.35);
+  animation: splashSpinRev 1.3s linear infinite;
+}
+
+.splash-core {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #22d3ee, #10b981);
+  box-shadow: 0 0 18px rgba(34, 211, 238, 0.85);
+}
+
+@keyframes splashSpin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes splashSpinRev {
+  to { transform: rotate(-360deg); }
+}
+
+.splash-title {
+  font-size: 20px;
+  font-weight: 800;
+  color: #f8fafc;
+  letter-spacing: 0.3px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.splash-subtitle {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin-top: -4px;
+}
+
+.splash-progress-track {
+  width: 100%;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.16);
+  overflow: hidden;
+  margin-top: 6px;
+}
+
+.splash-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #22d3ee, #10b981);
+  transition: width 0.28s ease;
+}
+
+.splash-status {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: #e2e8f0;
+  margin-top: 2px;
+}
+
+.splash-update-info {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: #7dd3fc;
+  min-height: 16px;
+}
+
+.splash-update-info.has-update {
+  color: #6ee7b7;
+  font-weight: 700;
+}
+
+/* Auth Recovery Panel (5-min time-lock) */
+.auth-recovery-box {
+  margin-top: 6px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(244, 63, 94, 0.08);
+  border: 1px solid rgba(244, 63, 94, 0.32);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.auth-recovery-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  color: #fecdd3;
+}
+
+.auth-recovery-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.action-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .glass {
   background: var(--glass-bg);
   backdrop-filter: blur(14px);

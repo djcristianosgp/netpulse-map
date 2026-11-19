@@ -277,6 +277,28 @@ int testAuthManagerAndRbac() {
   CHECK(auth.revokeApiToken(vwrRec.id));
   CHECK(!auth.authenticateHttp("Bearer " + vwrTok, "", "", false).authenticated);
 
+  // Time-locked authentication recovery (default 5 min enforced server-side)
+  auto recDefault = auth.startRecovery("127.0.0.1");
+  CHECK(recDefault.active && !recDefault.ready && recDefault.totalDelayMs == 300000ULL);
+  std::string recTok, recErr;
+  CHECK(!auth.completeRecovery(recDefault.recoveryId, "127.0.0.1", recTok, recErr).has_value());
+  CHECK(recErr.rfind("recovery_wait_required:", 0) == 0);
+  CHECK(auth.cancelRecovery("127.0.0.1"));
+  CHECK(!auth.getRecoveryStatus("127.0.0.1").active);
+
+  // Test completion after wait expires -> revokes old tokens & issues fresh Admin session
+  auth.setRecoveryDelayMs(40);
+  auto recFast = auth.startRecovery("127.0.0.1");
+  CHECK(recFast.active && !recFast.ready);
+  std::this_thread::sleep_for(std::chrono::milliseconds(60));
+  auto recStatus = auth.getRecoveryStatus("127.0.0.1");
+  CHECK(recStatus.active && recStatus.ready && recStatus.remainingMs == 0);
+  auto recSess = auth.completeRecovery(recFast.recoveryId, "127.0.0.1", recTok, recErr);
+  CHECK(recSess.has_value() && recSess->role == Role::Administrator);
+  CHECK(!recTok.empty());
+  CHECK(!auth.loginWithToken(oprTok, "127.0.0.1").has_value()); // old token revoked
+  CHECK(auth.loginWithToken(recTok, "127.0.0.1").has_value()); // new token works
+
   std::filesystem::remove_all(dir, ec);
   std::cout << "[PASS] testAuthManagerAndRbac\n";
   return 0;
